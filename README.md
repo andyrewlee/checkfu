@@ -1,7 +1,7 @@
 # Checkfu — Kindergarten Worksheet & Coloring Generator
 
 <p align="center">
-  <img src="./public/readme-hero.png" alt="Checkfu editor screenshot" width="900" />
+  <img width="1237" height="900" alt="Screenshot 2025-09-06 at 4 16 33 PM" src="https://github.com/user-attachments/assets/b7f99bdb-1d04-41ff-b77c-ddf842f6fc53" />
 </p>
 
 Checkfu generates printable black-and-white Kindergarten worksheets and coloring pages. Each node is a single 8.5×11 page with one image; you can refine a page with a prompt to create a child variant and export to PDF or print.
