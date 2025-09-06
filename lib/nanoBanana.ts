@@ -1,16 +1,7 @@
 export async function generateColoringBookImage(prompt: string): Promise<string> {
   const apiKey = typeof window !== 'undefined' ? localStorage.getItem('CHECKFU_GEMINI_API_KEY') || '' : '';
   if (!apiKey) throw new Error('Missing API key. Add it by clicking API Key in top right corner of the app. It is used only on the client side.');
-  let GenAI: any;
-  try {
-    GenAI = (await import('@google/genai') as any).GoogleGenAI;
-  } catch (_) {
-    try {
-      GenAI = (await import('@google/generative-ai') as any).GoogleGenerativeAI as any;
-    } catch (e) {
-      throw new Error('Gemini SDK not installed. Run: npm i @google/genai or @google/generative-ai');
-    }
-  }
+  const { GoogleGenAI: GenAI } = await import('@google/genai');
   const client = new GenAI({ apiKey });
 
   const styleBlock = [
@@ -39,16 +30,7 @@ export async function generateColoringBookImage(prompt: string): Promise<string>
 export async function transformImageWithPrompt(basePngB64: string, instruction: string): Promise<string> {
   const apiKey = typeof window !== 'undefined' ? localStorage.getItem('CHECKFU_GEMINI_API_KEY') || '' : '';
   if (!apiKey) throw new Error('Missing API key. Add it by clicking API Key in top right corner of the app. It is used only on the client side.');
-  let GenAI: any;
-  try {
-    GenAI = (await import('@google/genai') as any).GoogleGenAI;
-  } catch (_) {
-    try {
-      GenAI = (await import('@google/generative-ai') as any).GoogleGenerativeAI as any;
-    } catch (e) {
-      throw new Error('Gemini SDK not installed. Run: npm i @google/genai or @google/generative-ai');
-    }
-  }
+  const { GoogleGenAI: GenAI } = await import('@google/genai');
   const client = new GenAI({ apiKey });
   const styleBlock = [
     'Black ink line art only.',
@@ -76,16 +58,7 @@ export async function transformImageWithPrompt(basePngB64: string, instruction: 
 export async function editImageWithMaskGuidance(basePngB64: string, maskPngB64: string, instruction: string): Promise<string> {
   const apiKey = typeof window !== 'undefined' ? localStorage.getItem('CHECKFU_GEMINI_API_KEY') || '' : '';
   if (!apiKey) throw new Error('Missing API key. Add it by clicking API Key in top right corner of the app. It is used only on the client side.');
-  let GenAI: any;
-  try {
-    GenAI = (await import('@google/genai') as any).GoogleGenAI;
-  } catch (_) {
-    try {
-      GenAI = (await import('@google/generative-ai') as any).GoogleGenerativeAI as any;
-    } catch (e) {
-      throw new Error('Gemini SDK not installed. Run: npm i @google/genai or @google/generative-ai');
-    }
-  }
+  const { GoogleGenAI: GenAI } = await import('@google/genai');
   const client = new GenAI({ apiKey });
   const contents = [
     { text: `${instruction} Edit strictly inside the white region in the next mask image. Keep composition style and aspect ratio the same. Do not alter pixels where the mask is black.` },
