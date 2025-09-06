@@ -1,6 +1,6 @@
 export async function generateColoringBookImage(prompt: string): Promise<string> {
   const apiKey = typeof window !== 'undefined' ? localStorage.getItem('CHECKFU_GEMINI_API_KEY') || '' : '';
-  if (!apiKey) throw new Error('Missing API key. Add it in Settings (CHECKFU_GEMINI_API_KEY).');
+  if (!apiKey) throw new Error('Missing API key. Add it by clicking API Key in top right corner of the app. It is used only on the client side.');
   let GenAI: any;
   try {
     GenAI = (await import('@google/genai') as any).GoogleGenAI;
@@ -38,7 +38,7 @@ export async function generateColoringBookImage(prompt: string): Promise<string>
 
 export async function transformImageWithPrompt(basePngB64: string, instruction: string): Promise<string> {
   const apiKey = typeof window !== 'undefined' ? localStorage.getItem('CHECKFU_GEMINI_API_KEY') || '' : '';
-  if (!apiKey) throw new Error('Missing API key. Add it in Settings (CHECKFU_GEMINI_API_KEY).');
+  if (!apiKey) throw new Error('Missing API key. Add it by clicking API Key in top right corner of the app. It is used only on the client side.');
   let GenAI: any;
   try {
     GenAI = (await import('@google/genai') as any).GoogleGenAI;
@@ -75,7 +75,7 @@ export async function transformImageWithPrompt(basePngB64: string, instruction: 
 
 export async function editImageWithMaskGuidance(basePngB64: string, maskPngB64: string, instruction: string): Promise<string> {
   const apiKey = typeof window !== 'undefined' ? localStorage.getItem('CHECKFU_GEMINI_API_KEY') || '' : '';
-  if (!apiKey) throw new Error('Missing API key. Add it in Settings (CHECKFU_GEMINI_API_KEY).');
+  if (!apiKey) throw new Error('Missing API key. Add it by clicking API Key in top right corner of the app. It is used only on the client side.');
   let GenAI: any;
   try {
     GenAI = (await import('@google/genai') as any).GoogleGenAI;
