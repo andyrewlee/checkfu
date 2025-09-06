@@ -749,7 +749,7 @@ export default function EditorPage() {
       <header className="h-14 px-4 border-b border-slate-200 bg-sky-50/60 backdrop-blur flex items-center justify-between" role="toolbar" aria-label="Editor top bar">
         <div className="flex items-center gap-3">
           <span className="font-semibold">Checkfu</span>
-          <span className="text-sm text-slate-700">personalized learning materials for kindergartners</span>
+          <span className="text-sm text-slate-700">personalized learning materials for kindergarteners</span>
         </div>
         <div className="flex items-center gap-2">
           <button
