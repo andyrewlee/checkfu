@@ -1,8 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import ReactFlow, { Background, Controls, addEdge, applyNodeChanges } from "reactflow";
-import type { Edge, Node, NodeChange, Connection } from "reactflow";
+import { ReactFlow, Background, Controls, addEdge, applyNodeChanges } from "@xyflow/react";
+import type { Edge, Node as RFNode, NodeChange, Connection, NodeTypes } from "@xyflow/react";
 import { jsPDF } from "jspdf";
 import PageNode, { type PageNodeData } from "@/components/nodes/PageNode";
 import { useRef as useReactRef } from 'react';
@@ -35,7 +35,8 @@ export default function EditorPage() {
   const [pages, setPages] = useState<Page[]>(() => []);
   const [currentPageId, setCurrentPageId] = useState<string | null>(null);
   const currentPage = currentPageId ? (pages.find((p) => p.id === currentPageId) ?? null) : null;
-  const [nodes, setNodes] = useState<Node<PageNodeData>[]>([]);
+  type PageRFNode = RFNode<PageNodeData, 'page'>;
+  const [nodes, setNodes] = useState<PageRFNode[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
   const [showSettings, setShowSettings] = useState(false);
   const [generating, setGenerating] = useState(false);
@@ -68,12 +69,17 @@ export default function EditorPage() {
   }, []);
   const [toasts, setToasts] = useState<{ id: string; kind: 'error'|'info'|'success'; text: string }[]>([]);
   const lastQuickGenAtRef = useRef<number>(0);
-  // Inpainting overlay state
-  const [inpaintMode, setInpaintMode] = useState(false);
-  const [inpaintBrush, setInpaintBrush] = useState(24);
-  const [inpaintEraser, setInpaintEraser] = useState(false);
-  const [inpaintInvert, setInpaintInvert] = useState(false);
-  const inpaintCanvasMapRef = useRef<Map<string, HTMLCanvasElement>>(new Map());
+  // Keep current page visible in the sidebar
+  useEffect(() => {
+    if (!currentPageId) return;
+    const el = document.getElementById(`page-item-${currentPageId}`);
+    if (el) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }, [currentPageId]);
+  // Inpainting modal state
+  const [showInpaint, setShowInpaint] = useState(false);
+
+  // Memoize nodeTypes to avoid React Flow warning about new object each render
+  const nodeTypes = useMemo<NodeTypes>(() => ({ page: PageNode as any }), []);
 
   function pushToast(text: string, kind: 'error'|'info'|'success' = 'info') {
     const id = crypto.randomUUID();
@@ -82,12 +88,11 @@ export default function EditorPage() {
   }
 
   // Helper to build a React Flow node from a Page
-  function buildNode(p: Page, position: { x: number; y: number }): Node<PageNodeData> {
+  function buildNode(p: Page, position: { x: number; y: number }): PageRFNode {
     return {
       id: p.id,
       type: 'page',
       position,
-      dragHandle: '.rf-node-drag',
       data: {
         id: p.id,
         title: p.title,
@@ -95,16 +100,9 @@ export default function EditorPage() {
         marginInches: p.marginInches,
         imageUrl: p.imageUrl,
         onBranch: (pid) => branchFrom(pid),
+        onBranchWithPrompt: (pid, prompt) => branchFromWithPrompt(pid, prompt),
         onDelete: (pid) => deleteNode(pid),
         onQuickGenerate: (pid) => quickGenerate(pid),
-        painting: inpaintMode && currentPageId === p.id,
-        inpaintBrush,
-        inpaintEraser,
-        onRegisterMaskCanvas: (pid, el) => {
-          const m = inpaintCanvasMapRef.current;
-          if (!el) { m.delete(pid); return; }
-          m.set(pid, el);
-        },
       },
     };
   }
@@ -121,10 +119,114 @@ export default function EditorPage() {
     );
   }, [pages, currentPageId]);
 
-  const onNodesChange = (changes: NodeChange[]) => setNodes((ns) => applyNodeChanges(changes, ns));
+  const onNodesChange = (changes: NodeChange<PageRFNode>[]) =>
+    setNodes((ns) => applyNodeChanges<PageRFNode>(changes, ns));
 
   function setPagePatch(id: string, patch: Partial<Page>) {
     setPages((ps) => ps.map((p) => (p.id === id ? { ...p, ...patch } : p)));
+  }
+
+  // Compute printable area size in CSS pixels (96 DPI reference)
+  function computePrintablePx(p: Page): { pxW: number; pxH: number } {
+    const DPI = 96;
+    const pageWIn = p.orientation === 'portrait' ? 8.5 : 11;
+    const pageHIn = p.orientation === 'portrait' ? 11 : 8.5;
+    const imgWIn = pageWIn - 2 * (p.marginInches || 0);
+    const imgHIn = pageHIn - 2 * (p.marginInches || 0);
+    return { pxW: Math.max(1, Math.round(imgWIn * DPI)), pxH: Math.max(1, Math.round(imgHIn * DPI)) };
+  }
+
+  // Fit any image URL to exactly the printable area (cover crop to fill) and return a PNG data URL.
+  // Also auto-trims outer white margins and lightly crops inside any heavy border lines.
+  async function fitImageToPrintableArea(url: string, p: Page): Promise<string> {
+    const { pxW, pxH } = computePrintablePx(p);
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    await new Promise<void>((res, rej) => { img.onload = () => res(); img.onerror = () => rej(new Error('load failed')); img.src = url; });
+    const rT = pxW / pxH;
+
+    // First, auto-trim outer white margins from the source to remove unnecessary gutters around content.
+    const srcCanvas = document.createElement('canvas');
+    srcCanvas.width = img.width; srcCanvas.height = img.height;
+    const srcCtx = srcCanvas.getContext('2d'); if (!srcCtx) return url;
+    srcCtx.drawImage(img, 0, 0);
+    const data = srcCtx.getImageData(0, 0, img.width, img.height).data;
+    const isWhite = (idx: number) => {
+      const r = data[idx], g = data[idx + 1], b = data[idx + 2], a = data[idx + 3];
+      if (a < 8) return true; // treat near-transparent as white background
+      // luminance threshold; allow very light gray
+      const y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+      return y > 250;
+    };
+    let top = 0, bottom = img.height - 1, left = 0, right = img.width - 1;
+    // scan from top
+    scanTop: for (let y = 0; y < img.height; y++) {
+      for (let x = 0; x < img.width; x += 2) {
+        const i = (y * img.width + x) * 4;
+        if (!isWhite(i)) { top = Math.max(0, y - 1); break scanTop; }
+      }
+    }
+    // scan from bottom
+    scanBottom: for (let y = img.height - 1; y >= 0; y--) {
+      for (let x = 0; x < img.width; x += 2) {
+        const i = (y * img.width + x) * 4;
+        if (!isWhite(i)) { bottom = Math.min(img.height - 1, y + 1); break scanBottom; }
+      }
+    }
+    // scan from left
+    scanLeft: for (let x = 0; x < img.width; x++) {
+      for (let y = 0; y < img.height; y += 2) {
+        const i = (y * img.width + x) * 4;
+        if (!isWhite(i)) { left = Math.max(0, x - 1); break scanLeft; }
+      }
+    }
+    // scan from right
+    scanRight: for (let x = img.width - 1; x >= 0; x--) {
+      for (let y = 0; y < img.height; y += 2) {
+        const i = (y * img.width + x) * 4;
+        if (!isWhite(i)) { right = Math.min(img.width - 1, x + 1); break scanRight; }
+      }
+    }
+    let sx = Math.max(0, left), sy = Math.max(0, top);
+    let sw = Math.max(1, right - left + 1), sh = Math.max(1, bottom - top + 1);
+
+    // Lightly crop inside any heavy border lines by a few pixels (bleed), if the trim changed the rect.
+    const bleed = 4;
+    if (sw < img.width || sh < img.height) {
+      sx = Math.min(Math.max(0, sx + bleed), img.width - 1);
+      sy = Math.min(Math.max(0, sy + bleed), img.height - 1);
+      sw = Math.max(1, Math.min(img.width - sx, sw - bleed * 2));
+      sh = Math.max(1, Math.min(img.height - sy, sh - bleed * 2));
+    }
+
+    // Now apply cover-crop within the trimmed rect to match the printable aspect ratio exactly.
+    const rS = sw / sh;
+    if (!isFinite(rS) || sw === 0 || sh === 0) {
+      // fallback: contain
+      const c = document.createElement('canvas'); c.width = pxW; c.height = pxH; const ctx = c.getContext('2d'); if (!ctx) return url;
+      ctx.fillStyle = '#ffffff'; ctx.fillRect(0,0,pxW,pxH);
+      const scale = Math.min(pxW / Math.max(1, img.width), pxH / Math.max(1, img.height));
+      const dw = Math.round(img.width * scale), dh = Math.round(img.height * scale);
+      const dx = Math.floor((pxW - dw)/2), dy = Math.floor((pxH - dh)/2);
+      ctx.drawImage(img, 0, 0, img.width, img.height, dx, dy, dw, dh);
+      return c.toDataURL('image/png');
+    }
+    if (rS > rT) {
+      // source wider → crop width inside trimmed rect
+      const newSw = Math.round(sh * rT);
+      sx = Math.floor(sx + (sw - newSw) / 2);
+      sw = newSw;
+    } else if (rS < rT) {
+      // source taller → crop height inside trimmed rect
+      const newSh = Math.round(sw / rT);
+      sy = Math.floor(sy + (sh - newSh) / 2);
+      sh = newSh;
+    }
+    const c = document.createElement('canvas'); c.width = pxW; c.height = pxH;
+    const ctx = c.getContext('2d'); if (!ctx) return url;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(img, sx, sy, sw, sh, 0, 0, pxW, pxH);
+    return c.toDataURL('image/png');
   }
 
   // Build an explicit, printing-oriented System Prompt from selections
@@ -138,8 +240,8 @@ export default function EditorPage() {
       const cc = codes ? `Common Core Kindergarten focus: ${codes}. ` : 'Common Core Kindergarten math practices. ';
       const ccDetail = descs.length ? `Target standards details: ${descs.join('; ')}. ` : '';
       const goal = 'Design a solvable, self-contained worksheet a kindergarten student can complete independently. Provide a single clear task/instruction and space to answer. Use concrete visual math tools (ten frames, number lines, dot cards, simple manipulatives). Quantities ≤ 10. '; 
-      const layout = 'Balance composition for print. Include obvious answer areas (blank boxes/frames/lines) with ample white space. Keep one main task per page. High contrast. '; 
-      const style = 'Black ink line art only. Thick outlines. White background. No shading or gray. Center within letter-size margins (8.5×11). Minimal text; numerals OK.';
+      const layout = 'Balance composition for print. Include obvious answer areas (blank boxes/frames/lines) with ample white space. Keep one main task per page. High contrast. Fill the printable area inside margins; avoid borders, frames, titles, or page headers.'; 
+      const style = 'Black ink line art only. Thick outlines. White background. No shading or gray. Letter-size proportion (8.5×11). No decorative frames or captions. Minimal text; numerals OK.';
       return `${cc}${ccDetail}${goal}${layout}${style}`.trim();
     } else {
       const styleName = p.coloringStyle || 'classic';
@@ -147,7 +249,7 @@ export default function EditorPage() {
         : styleName === 'retro' ? 'Retro 1960s cartoon style; bold outlines; simple shapes.'
         : styleName === 'storybook' ? 'Classic Western storybook sketch style; bold outlines; simple shapes.'
         : 'Classic coloring book style; bold outlines; large shapes.';
-      const base = 'Black ink line art only. White background. No shading or gray. Center within letter-size margins.';
+      const base = 'Black ink line art only. White background. No shading or gray. Letter-size proportion (8.5×11). Fill the printable area inside margins. Do not include frames, borders, titles, or headers.';
       return `${styleText} ${base}`.trim();
     }
   }
@@ -246,15 +348,17 @@ export default function EditorPage() {
   async function generateChildFromParent(childId: string, parent: Page, prompt: string) {
     // If parent has an image, try transform with base; else generate new
     const baseUrl = parent.originalImageUrl || parent.imageUrl;
+    // Draft child page object to avoid relying on asynchronous state updates
+    const childDraft: Page = { ...parent, id: childId, prompt };
     if (baseUrl) {
       try {
         setGenerating(true);
         const baseB64 = await blobUrlToPngBase64(baseUrl);
-        const child = pages.find(p => p.id === childId)!;
-        const instruction = buildInstructionPrompt(child, prompt);
+        const instruction = buildInstructionPrompt(childDraft, prompt);
         const { transformImageWithPrompt } = await import('@/lib/nanoBanana');
-        const url = await transformImageWithPrompt(baseB64, instruction);
-        setPagePatch(childId, { imageUrl: url, originalImageUrl: url });
+        const rawUrl = await transformImageWithPrompt(baseB64, instruction);
+        const fitted = await fitImageToPrintableArea(rawUrl, childDraft);
+        setPagePatch(childId, { imageUrl: fitted, originalImageUrl: fitted });
         return;
       } catch (e) {
         console.warn('Transform failed; falling back to generate', e);
@@ -263,7 +367,7 @@ export default function EditorPage() {
         setGenerating(false);
       }
     }
-    await generateInto(childId, prompt);
+    await generateInto(childId, prompt, childDraft);
   }
 
   function buildInstructionPrompt(page: Page, userPrompt: string): string {
@@ -272,22 +376,23 @@ export default function EditorPage() {
     return [sys, user].filter(Boolean).join(' ');
   }
 
-  async function generateInto(pageId: string, prompt: string) {
+  async function generateInto(pageId: string, prompt: string, pageOverride?: Page) {
     try {
       setGenerating(true);
-      const page = pages.find(p => p.id === pageId)!;
+      const page = pageOverride ?? pages.find(p => p.id === pageId)!;
       const instruction = buildInstructionPrompt(page, prompt);
       const { generateColoringBookImage } = await import("@/lib/nanoBanana");
-      const url = await generateColoringBookImage(instruction);
+      const rawUrl = await generateColoringBookImage(instruction);
+      const fitted = await fitImageToPrintableArea(rawUrl, page);
       // Revoke previous object URLs to avoid leaks
       const prev = pages.find((p) => p.id === pageId);
       if (prev) {
         try {
-          if (prev.originalImageUrl && prev.originalImageUrl.startsWith('blob:') && prev.originalImageUrl !== url) URL.revokeObjectURL(prev.originalImageUrl);
-          if (prev.imageUrl && prev.imageUrl.startsWith('blob:') && prev.imageUrl !== url) URL.revokeObjectURL(prev.imageUrl);
+          if (prev.originalImageUrl && prev.originalImageUrl.startsWith('blob:') && prev.originalImageUrl !== rawUrl) URL.revokeObjectURL(prev.originalImageUrl);
+          if (prev.imageUrl && prev.imageUrl.startsWith('blob:') && prev.imageUrl !== rawUrl) URL.revokeObjectURL(prev.imageUrl);
         } catch {}
       }
-      setPagePatch(pageId, { imageUrl: url, originalImageUrl: url });
+      setPagePatch(pageId, { imageUrl: fitted, originalImageUrl: fitted });
     } catch (err) {
       pushToast((err as Error).message || 'Failed to generate image', 'error');
     } finally {
@@ -295,7 +400,7 @@ export default function EditorPage() {
     }
   }
 
-  async function applyInpainting(maskCanvas: HTMLCanvasElement) {
+  async function applyInpainting(maskCanvas: HTMLCanvasElement, invert: boolean) {
     const page = currentPageId ? pages.find(p => p.id === currentPageId) : null;
     if (!page || !page.imageUrl) { pushToast('No base image to inpaint', 'error'); return; }
     try {
@@ -319,19 +424,20 @@ export default function EditorPage() {
       const mc = document.createElement('canvas'); mc.width = maskCanvas.width; mc.height = maskCanvas.height;
       const mctx = mc.getContext('2d')!; mctx.fillStyle = '#000'; mctx.fillRect(0,0,mc.width,mc.height);
       const src = maskData.data; const dst = mctx.getImageData(0,0,mc.width,mc.height); const dd = dst.data;
-      for (let i=0;i<dd.length;i+=4) { const a = src[i+3]; const on = (a>0) ? 255 : 0; const v = inpaintInvert ? 255-on : on; dd[i]=dd[i+1]=dd[i+2]=v; dd[i+3]=255; }
+      for (let i=0;i<dd.length;i+=4) { const a = src[i+3]; const on = (a>0) ? 255 : 0; const v = invert ? 255-on : on; dd[i]=dd[i+1]=dd[i+2]=v; dd[i+3]=255; }
       mctx.putImageData(dst, 0, 0);
       const maskB64 = mc.toDataURL('image/png').replace(/^data:image\/png;base64,/, '');
       const instruction = buildInstructionPrompt(page, page.prompt || '');
       const { editImageWithMaskGuidance } = await import('@/lib/nanoBanana');
-      const url = await editImageWithMaskGuidance(baseB64, maskB64, instruction);
-      setPagePatch(currentPageId!, { imageUrl: url, originalImageUrl: url });
+      const rawUrl = await editImageWithMaskGuidance(baseB64, maskB64, instruction);
+      const fitted = await fitImageToPrintableArea(rawUrl, page);
+      setPagePatch(currentPageId!, { imageUrl: fitted, originalImageUrl: fitted });
       pushToast('Inpainting applied', 'success');
     } catch (e) {
       pushToast((e as Error).message || 'Inpainting failed', 'error');
     } finally {
       setGenerating(false);
-      setInpaintMode(false);
+      setShowInpaint(false);
     }
   }
 
@@ -427,22 +533,26 @@ export default function EditorPage() {
     };
     window.addEventListener("paste", onPaste);
     const onKeyDown = (e: KeyboardEvent) => {
-      // Cmd/Ctrl+Enter → quick generate on current node
-      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      const active = document.activeElement as HTMLElement | null;
+      const editing = !!(active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable));
+      // Cmd/Ctrl+Enter → quick generate on current node (not while typing)
+      if (!editing && (e.ctrlKey || e.metaKey) && e.key === 'Enter') {
         e.preventDefault();
         if (currentPageId) quickGenerate(currentPageId);
+        return;
       }
-      // Delete key to delete selected/current node
-      if (e.key === 'Delete' || e.key === 'Backspace') {
-        const active = document.activeElement as HTMLElement | null;
-        const editing = active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable);
-        if (!editing) {
-          e.preventDefault();
-          if (currentPageId) deleteNode(currentPageId);
-        }
+      // Delete key to delete selected/current node (not while typing)
+      if (!editing && (e.key === 'Delete' || e.key === 'Backspace')) {
+        e.preventDefault();
+        if (currentPageId) deleteNode(currentPageId);
+        return;
       }
-      // Inpainting toggle with "i"
-      if (e.key.toLowerCase() === 'i' && currentPageId) { e.preventDefault(); setInpaintMode(s=>!s); }
+      // Inpainting modal with "i" (not while typing)
+      if (!editing && e.key.toLowerCase() === 'i' && currentPageId) {
+        e.preventDefault();
+        setShowInpaint(true);
+        return;
+      }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => { window.removeEventListener("paste", onPaste); window.removeEventListener('keydown', onKeyDown); };
@@ -587,19 +697,24 @@ export default function EditorPage() {
           <span className="text-sm text-muted-foreground">Editor</span>
         </div>
         <div className="flex items-center gap-2">
-          <button className="px-3 py-1.5 rounded-md border text-sm disabled:opacity-50" aria-label="Export current" disabled={!currentPage} onClick={() => currentPage && exportCurrentPageToPdf(currentPage)}>Export Current</button>
-          <button className="px-3 py-1.5 rounded-md border text-sm disabled:opacity-50" aria-label="Export selected" disabled={!nodes.length} onClick={() => { const selectedPages = nodes.filter(n => n.selected).map(n => pages.find(p => p.id === n.id)!).filter(Boolean) as Page[]; void exportPagesToPdf(selectedPages.length ? selectedPages : (currentPage ? [currentPage] : [])); }}>Export Selected</button>
-          <button className="px-3 py-1.5 rounded-md border text-sm disabled:opacity-50" aria-label="Export all" disabled={!pages.length} onClick={() => void exportPagesToPdf(pages)}>Export All</button>
-          <button className="px-3 py-1.5 rounded-md border text-sm disabled:opacity-50" aria-label="Save JSON" disabled={!pages.length} onClick={() => {
-            const doc = { version: 1, pages, edges };
-            const blob = new Blob([JSON.stringify(doc, null, 2)], { type: 'application/json' });
-            const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = 'checkfu.json'; a.click(); URL.revokeObjectURL(url);
-          }}>Save</button>
-          <label className="px-3 py-1.5 rounded-md border text-sm cursor-pointer">
-            Load
-            <input type="file" accept="application/json" className="hidden" onChange={async (e)=>{
-              const f = e.currentTarget.files?.[0]; if (!f) return; try { const text = await f.text(); const doc = JSON.parse(text); if (doc?.version !== 1) throw new Error('Unsupported doc version'); setPages(doc.pages || []); setEdges(doc.edges || []); setCurrentPageId(doc.pages?.[0]?.id || null); } catch (err) { pushToast('Invalid JSON', 'error'); } }} />
-          </label>
+          <button
+            className="inline-flex items-center gap-2 px-3 py-1.5 rounded-md border text-sm disabled:opacity-50"
+            aria-label="Export"
+            disabled={!pages.length}
+            onClick={() => {
+              const selected = nodes.filter(n => n.selected).map(n => pages.find(p => p.id === n.id)!).filter(Boolean) as Page[];
+              const toExport = selected.length ? selected : (currentPage ? [currentPage] : []);
+              if (!toExport.length) return;
+              void exportPagesToPdf(toExport);
+            }}
+          >
+            <span>Export</span>
+            {nodes.filter(n => n.selected).length > 1 ? (
+              <span className="px-1.5 h-5 min-w-[1.25rem] inline-flex items-center justify-center rounded bg-slate-200 text-slate-800 text-xs" aria-label="Selected count">
+                {nodes.filter(n => n.selected).length}
+              </span>
+            ) : null}
+          </button>
           <button className="px-3 py-1.5 rounded-md border text-sm" aria-label="Settings" onClick={() => setShowSettings(true)}>
             Settings
           </button>
@@ -621,13 +736,41 @@ export default function EditorPage() {
           </div>
           <div className="p-3 overflow-auto grow" role="region" aria-label="Pages list">
             <ul className="space-y-1 text-sm">
-              {pages.map((p) => (
-                <li key={p.id}>
-                  <button className={`w-full text-left px-2 py-1 rounded hover:bg-accent ${currentPageId === p.id ? "bg-accent" : ""}`} onClick={() => setCurrentPageId(p.id)}>
-                    {p.title}
-                  </button>
-                </li>
-              ))}
+              {pages.map((p) => {
+                const selectedIds = new Set(nodes.filter(n => n.selected).map(n => n.id));
+                const isSelected = selectedIds.has(p.id);
+                const isActive = currentPageId === p.id;
+                return (
+                  <li key={p.id}>
+                    <button
+                      id={`page-item-${p.id}`}
+                      className={`w-full text-left px-2 py-1 rounded transition-colors hover:bg-slate-100 ${isSelected ? 'bg-slate-100' : ''} ${isActive ? 'ring-1 ring-blue-500 bg-blue-50 border-l-2 border-blue-500' : ''}`}
+                      aria-pressed={isSelected}
+                      aria-current={isActive ? 'page' : undefined}
+                      onClick={(e) => {
+                        const isToggle = e.metaKey || e.ctrlKey;
+                        setCurrentPageId(p.id);
+                        if (isToggle) {
+                          setNodes((ns) => ns.map(n => n.id === p.id ? { ...n, selected: !n.selected } : n));
+                        } else {
+                          setNodes((ns) => ns.map(n => ({ ...n, selected: n.id === p.id })));
+                        }
+                      }}
+                    >
+                      <span className="flex items-center justify-between">
+                        <span className="truncate">{p.title}</span>
+                        <span className="ml-2">
+                          {isActive ? (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-100 text-blue-800 align-middle">Active</span>
+                          ) : isSelected ? (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-200 text-slate-800 align-middle">Selected</span>
+                          ) : null}
+                        </span>
+                      </span>
+                    </button>
+                  </li>
+                );
+              })}
             </ul>
           </div>
         </aside>
@@ -639,10 +782,18 @@ export default function EditorPage() {
               nodes={nodes}
               edges={edges}
               fitView
-              nodeTypes={{ page: PageNode }}
+              fitViewOptions={{ padding: 0.22 }}
+              defaultViewport={{ x: 0, y: 0, zoom: 0.72 }}
+              minZoom={0.05}
+              maxZoom={2.5}
+              translateExtent={[[-100000, -100000], [100000, 100000]]}
+              nodeTypes={nodeTypes}
               onNodesChange={onNodesChange}
               onNodeClick={(_, n) => setCurrentPageId(n.id)}
               onConnect={(c: Connection) => setEdges((es) => addEdge(c, es))}
+              noPanClassName="nopan"
+              noDragClassName="nodrag"
+              noWheelClassName="nowheel"
             >
               <Background />
               <Controls className="no-print" />
@@ -764,34 +915,16 @@ export default function EditorPage() {
                     setGenerating(false);
                   }
                 }}>{generating ? "Generating…" : "Generate"}</button>
-                <div className="grid gap-2">
-                  <div className="flex items-center gap-2">
-                    <label className="flex items-center gap-1 text-xs">
-                      <input type="checkbox" checked={inpaintMode} onChange={(e)=>setInpaintMode(e.currentTarget.checked)} disabled={!currentPage?.imageUrl} />
-                      Inpainting mode
-                    </label>
-                    <span className="text-xs text-muted-foreground">Press I to toggle</span>
-                  </div>
-                  {inpaintMode && (
-                    <div className="grid gap-2">
-                      <label className="flex items-center gap-2 text-xs">
-                        Brush {inpaintBrush}
-                        <input type="range" min={4} max={96} step={2} value={inpaintBrush} onChange={(e)=>setInpaintBrush(parseInt(e.currentTarget.value,10))} />
-                        <span className="flex items-center gap-1"><input type="checkbox" checked={inpaintEraser} onChange={(e)=>setInpaintEraser(e.currentTarget.checked)} />Eraser</span>
-                        <span className="flex items-center gap-1"><input type="checkbox" checked={inpaintInvert} onChange={(e)=>setInpaintInvert(e.currentTarget.checked)} />Invert</span>
-                      </label>
-                      <div className="flex items-center gap-2">
-                        <button className="px-2 py-1 border rounded" onClick={()=>{
-                          const c = currentPageId ? inpaintCanvasMapRef.current.get(currentPageId) : undefined; if (!c) return; const ctx = c.getContext('2d'); if (!ctx) return; ctx.clearRect(0,0,c.width,c.height);
-                        }}>Clear</button>
-                        <button className="px-2 py-1 border rounded" onClick={()=>{
-                          const c = currentPageId ? inpaintCanvasMapRef.current.get(currentPageId) : undefined; if (c) void applyInpainting(c);
-                        }} disabled={!currentPage?.imageUrl}>Apply Inpaint</button>
-                        <button className="px-2 py-1 border rounded" onClick={()=>setInpaintMode(false)}>Done</button>
-                      </div>
-                    </div>
-                  )}
-                </div>
+                {/* Inpainting moved to its own modal/section */}
+              </div>
+            </section>
+
+            {/* Inpainting */}
+            <section>
+              <h3 className="text-sm font-medium text-muted-foreground">Inpainting</h3>
+              <div className="mt-2 grid gap-2">
+                <button className="px-2 py-1 border rounded disabled:opacity-50 w-max" disabled={!currentPage?.imageUrl} onClick={() => setShowInpaint(true)}>Inpaint…</button>
+                <p className="text-xs text-muted-foreground">Paint a pink mask to transform selected areas. Press I to open quickly.</p>
               </div>
             </section>
 
@@ -826,7 +959,14 @@ export default function EditorPage() {
         ))}
       </div>
 
-      {/* On-node overlay handles inpainting; modal removed */}
+      {/* Inpainting modal */}
+      {showInpaint && currentPage?.imageUrl ? (
+        <InpaintModal
+          imageUrl={currentPage.imageUrl}
+          onCancel={() => setShowInpaint(false)}
+          onApply={(maskCanvas, invert) => void applyInpainting(maskCanvas, invert)}
+        />
+      ) : null}
 
       {/* Settings modal */}
       {branchingParentId && (
@@ -861,33 +1001,24 @@ export default function EditorPage() {
   );
 }
 
-// Inpainting modal component: paints a white/black mask over the base image
+// Inpainting modal component: paints a pink translucent mask over the base image
 function InpaintModal({
   imageUrl,
-  brushSize,
-  setBrushSize,
-  eraser,
-  setEraser,
-  invert,
-  setInvert,
   onCancel,
   onApply,
 }: {
   imageUrl?: string;
-  brushSize: number;
-  setBrushSize: (n: number) => void;
-  eraser: boolean;
-  setEraser: (b: boolean) => void;
-  invert: boolean;
-  setInvert: (b: boolean) => void;
   onCancel: () => void;
-  onApply: (maskCanvas: HTMLCanvasElement) => void;
+  onApply: (maskCanvas: HTMLCanvasElement, invert: boolean) => void;
 }) {
   const canvasRef = useReactRef<HTMLCanvasElement | null>(null);
   const maskRef = useReactRef<HTMLCanvasElement | null>(null);
   const isDownRef = useReactRef(false);
   const scaleRef = useReactRef(1);
   const imgRef = useReactRef<HTMLImageElement | null>(null);
+  const [brushSize, setBrushSize] = useState(24);
+  const [eraser, setEraser] = useState(false);
+  const [invert, setInvert] = useState(false);
 
   // Setup canvas and draw base image
   useEffect(() => {
@@ -905,7 +1036,7 @@ function InpaintModal({
       c.width = w; c.height = h; m.width = w; m.height = h;
       const ctx = c.getContext('2d'); if (!ctx) return;
       ctx.clearRect(0,0,w,h); ctx.drawImage(img, 0, 0, w, h);
-      const mctx = m.getContext('2d'); if (!mctx) return; mctx.fillStyle = 'black'; mctx.fillRect(0,0,w,h);
+      const mctx = m.getContext('2d'); if (!mctx) return; mctx.clearRect(0,0,w,h);
     };
     void setup();
   }, [imageUrl]);
@@ -915,8 +1046,8 @@ function InpaintModal({
     const rect = m.getBoundingClientRect();
     const x = clientX - rect.left; const y = clientY - rect.top;
     const ctx = m.getContext('2d'); if (!ctx) return;
-    ctx.globalCompositeOperation = 'source-over';
-    ctx.fillStyle = eraser ? 'black' : 'white';
+    ctx.globalCompositeOperation = eraser ? 'destination-out' : 'source-over';
+    ctx.fillStyle = 'rgba(255, 20, 147, 0.45)';
     ctx.beginPath(); ctx.arc(x, y, Math.max(1, brushSize/2), 0, Math.PI*2); ctx.fill();
   }
 
@@ -931,7 +1062,7 @@ function InpaintModal({
             <label className="flex items-center gap-1">Brush {brushSize}
               <input type="range" min={4} max={96} step={2} value={brushSize} onChange={(e)=>setBrushSize(parseInt(e.currentTarget.value,10))} />
             </label>
-            <button className="px-2 py-1 border rounded" onClick={()=>{ const m = maskRef.current; if (!m) return; const mctx = m.getContext('2d'); if (!mctx) return; mctx.fillStyle='black'; mctx.fillRect(0,0,m.width,m.height); }}>Clear</button>
+            <button className="px-2 py-1 border rounded" onClick={()=>{ const m = maskRef.current; if (!m) return; const mctx = m.getContext('2d'); if (!mctx) return; mctx.clearRect(0,0,m.width,m.height); }}>Clear</button>
           </div>
         </div>
         <div className="relative border bg-slate-50" style={{width:'fit-content'}}>
@@ -947,7 +1078,7 @@ function InpaintModal({
         </div>
         <div className="flex justify-end gap-2 mt-3">
           <button className="px-2 py-1 border rounded" onClick={onCancel}>Cancel</button>
-          <button className="px-2 py-1 border rounded" onClick={()=>{ const m = maskRef.current; if (m) onApply(m); }}>Apply Inpaint</button>
+          <button className="px-2 py-1 border rounded" onClick={()=>{ const m = maskRef.current; if (m) onApply(m, invert); }}>Save</button>
         </div>
       </div>
     </div>

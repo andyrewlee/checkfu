@@ -15,12 +15,12 @@
     "@clerk/clerk-react": "^5.25.0",
     "@clerk/nextjs": "^6.12.6",
     "@google/genai": "^1.17.0",
+    "@xyflow/react": "^12.8.4",
     "convex": "^1.26.0",
     "jspdf": "^2.5.2",
     "next": "15.2.3",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0",
-    "reactflow": "^11.11.4"
+    "react-dom": "^19.0.0"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3",

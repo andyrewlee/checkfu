@@ -1,8 +1,10 @@
 @import "tailwindcss";
 
+/* Light mode sketch/school theme */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #fafafa;
+  --foreground: #0f172a; /* slate-900 */
+  --paper-line: rgba(2, 6, 23, 0.04);
 }
 
 @theme inline {
@@ -12,18 +14,19 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
 body {
   color: var(--foreground);
-  background: var(--background);
+  background-color: var(--background);
   font-family: Arial, Helvetica, sans-serif;
+  /* subtle notebook grid */
+  background-image:
+    linear-gradient(to bottom, var(--paper-line) 1px, transparent 1px),
+    linear-gradient(to right, var(--paper-line) 1px, transparent 1px);
+  background-size: 24px 24px, 24px 24px;
 }
+
+/* Card-like containers stand out from the lined background */
+.bg-background { background-color: #fff !important; }
 
 /* Print CSS for letter paper */
 @media print {
@@ -31,3 +34,6 @@ body {
   html, body { width: 8.5in; height: 11in; }
   .no-print { display: none !important; }
 }
+
+/* Ensure React Flow NodeToolbar is interactive even though viewport uses pointer-events: none */
+.react-flow__node-toolbar { pointer-events: all; }
