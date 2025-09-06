@@ -973,15 +973,9 @@ export default function EditorPage() {
                       className="border rounded px-2 py-1 text-sm"
                       onChange={(e) => {
                         const q = e.currentTarget.value.toLowerCase();
-                        const all = standardsCatalog;
-                        const filtered = q
-                          ? all.filter(s => s.code.toLowerCase().includes(q) || (s.description || '').toLowerCase().includes(q))
-                          : all;
-                        // Store filtered list temporarily via dataset on the select (no extra state)
                         const sel = document.getElementById('k-standards-select') as HTMLSelectElement | null;
                         if (sel) {
                           sel.dataset.filter = q;
-                          // Force rerender by toggling a dummy value
                           sel.dispatchEvent(new Event('rebuild'));
                         }
                       }}
