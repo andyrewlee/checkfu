@@ -1,11 +1,72 @@
 "use client";
 
 import { useState } from "react";
+import WorksheetCanvas from "@/components/WorksheetCanvas";
 
 type LeftTab = "templates" | "pages";
+type Orientation = "portrait" | "landscape";
 
 export default function EditorPage() {
   const [leftTab, setLeftTab] = useState<LeftTab>("templates");
+  const [orientation, setOrientation] = useState<Orientation>("portrait");
+  const [marginInches, setMarginInches] = useState<number>(0.5);
+  const [zoom, setZoom] = useState<number>(1);
+  const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [panning, setPanning] = useState(false);
+  const [lastPos, setLastPos] = useState<{ x: number; y: number } | null>(null);
+  const [spaceDown, setSpaceDown] = useState(false);
+
+  const onPointerDown = (e: React.PointerEvent) => {
+    // Start panning with middle mouse, right mouse, or space+left
+    if (e.button === 1 || e.button === 2 || (e.button === 0 && spaceDown)) {
+      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+      setPanning(true);
+      setLastPos({ x: e.clientX, y: e.clientY });
+    }
+  };
+  const onPointerMove = (e: React.PointerEvent) => {
+    if (!panning || !lastPos) return;
+    const dx = e.clientX - lastPos.x;
+    const dy = e.clientY - lastPos.y;
+    setPan((p) => ({ x: p.x + dx, y: p.y + dy }));
+    setLastPos({ x: e.clientX, y: e.clientY });
+  };
+  const onPointerUp = (e: React.PointerEvent) => {
+    if (!panning) return;
+    (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+    setPanning(false);
+    setLastPos(null);
+  };
+  const onWheel = (e: React.WheelEvent) => {
+    // Zoom if Ctrl/Cmd is held (pinch gesture), otherwise ignore
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const delta = -e.deltaY; // natural: scroll up to zoom in
+      const factor = Math.exp(delta * 0.0015); // smooth exponential zoom
+      setZoom((z) => clamp(z * factor, 0.25, 3));
+    }
+  };
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === " ") {
+      setSpaceDown(true);
+    }
+    if ((e.metaKey || e.ctrlKey) && (e.key === "+" || e.key === "=")) {
+      e.preventDefault();
+      setZoom((z) => clamp(z * 1.1, 0.25, 3));
+    }
+    if ((e.metaKey || e.ctrlKey) && e.key === "-") {
+      e.preventDefault();
+      setZoom((z) => clamp(z / 1.1, 0.25, 3));
+    }
+    if (e.key.toLowerCase() === "0" && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      setZoom(1);
+      setPan({ x: 0, y: 0 });
+    }
+  };
+  const onKeyUp = (e: React.KeyboardEvent) => {
+    if (e.key === " ") setSpaceDown(false);
+  };
 
   return (
     <div className="h-screen w-screen overflow-hidden bg-background text-foreground">
@@ -89,22 +150,29 @@ export default function EditorPage() {
           </div>
         </aside>
 
-        {/* Canvas column */}
-        <main className="bg-muted/20 flex items-center justify-center overflow-auto" aria-label="Canvas area">
-          {/* Letter canvas placeholder (portrait) */}
-          <div className="relative bg-white shadow-sm border" style={{ width: 816, height: 1056 }}>
-            {/* Safe margin overlay: 0.5in default */}
-            <div
-              className="absolute inset-0 pointer-events-none"
-              aria-hidden
-            >
-              <div className="absolute inset-0 m-12 border-2 border-dashed border-slate-300" />
-            </div>
-            <div className="absolute left-3 top-3 text-[11px] text-slate-500 select-none">
-              Letter 8.5in × 11in — margin 0.5in (placeholder)
-            </div>
-            <div className="h-full w-full flex items-center justify-center">
-              <span className="text-slate-400">Canvas placeholder</span>
+        {/* Canvas column (infinite stage) */}
+        <main
+          className="bg-muted/20 overflow-hidden"
+          aria-label="Canvas area"
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onWheel={onWheel}
+          onKeyDown={onKeyDown}
+          onKeyUp={onKeyUp}
+          tabIndex={0}
+        >
+          <div className="w-full h-full relative">
+            <div className="absolute inset-0 flex items-center justify-center">
+              <div
+                className="will-change-transform"
+                style={{
+                  transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+                  transformOrigin: "center center",
+                }}
+              >
+                <WorksheetCanvas orientation={orientation} marginInches={marginInches} />
+              </div>
             </div>
           </div>
         </main>
@@ -122,13 +190,37 @@ export default function EditorPage() {
               <div className="mt-2 grid grid-cols-2 gap-2 text-sm">
                 <label className="col-span-1">Orientation</label>
                 <div className="col-span-1 flex gap-1">
-                  <button className="px-2 py-1 border rounded">Portrait</button>
-                  <button className="px-2 py-1 border rounded">Landscape</button>
+                  <button
+                    className={`px-2 py-1 border rounded ${orientation === "portrait" ? "bg-accent" : ""}`}
+                    aria-pressed={orientation === "portrait"}
+                    onClick={() => setOrientation("portrait")}
+                  >
+                    Portrait
+                  </button>
+                  <button
+                    className={`px-2 py-1 border rounded ${orientation === "landscape" ? "bg-accent" : ""}`}
+                    aria-pressed={orientation === "landscape"}
+                    onClick={() => setOrientation("landscape")}
+                  >
+                    Landscape
+                  </button>
                 </div>
                 <label className="col-span-1">Margin</label>
                 <div className="col-span-1 flex gap-1">
-                  <button className="px-2 py-1 border rounded">0.5 in</button>
-                  <button className="px-2 py-1 border rounded">1 in</button>
+                  <button
+                    className={`px-2 py-1 border rounded ${marginInches === 0.5 ? "bg-accent" : ""}`}
+                    aria-pressed={marginInches === 0.5}
+                    onClick={() => setMarginInches(0.5)}
+                  >
+                    0.5 in
+                  </button>
+                  <button
+                    className={`px-2 py-1 border rounded ${marginInches === 1 ? "bg-accent" : ""}`}
+                    aria-pressed={marginInches === 1}
+                    onClick={() => setMarginInches(1)}
+                  >
+                    1 in
+                  </button>
                 </div>
               </div>
             </section>
@@ -145,8 +237,33 @@ export default function EditorPage() {
         className="h-7 px-3 border-t bg-background text-xs flex items-center justify-between"
         aria-live="polite"
       >
-        <div className="flex items-center gap-4">
-          <span>Zoom: 100%</span>
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-1">
+            <button
+              className="px-1.5 py-0.5 border rounded"
+              aria-label="Zoom out"
+              onClick={() => setZoom((z) => clamp(z / 1.1, 0.25, 3))}
+            >
+              −
+            </button>
+            <button
+              className="px-2 py-0.5 border rounded"
+              aria-label="Reset zoom"
+              onClick={() => {
+                setZoom(1);
+                setPan({ x: 0, y: 0 });
+              }}
+            >
+              {Math.round(zoom * 100)}%
+            </button>
+            <button
+              className="px-1.5 py-0.5 border rounded"
+              aria-label="Zoom in"
+              onClick={() => setZoom((z) => clamp(z * 1.1, 0.25, 3))}
+            >
+              +
+            </button>
+          </div>
           <span>Standards: none</span>
         </div>
         <div className="text-muted-foreground">
@@ -157,3 +274,6 @@ export default function EditorPage() {
   );
 }
 
+function clamp(v: number, lo: number, hi: number) {
+  return Math.max(lo, Math.min(hi, v));
+}
