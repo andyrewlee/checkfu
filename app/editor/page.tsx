@@ -351,7 +351,7 @@ export default function EditorPage() {
       originalImageUrl: url,
       imageUrl: url,
       bwThreshold: 200,
-      pageType: 'worksheet',
+      pageType: 'coloring',
       coloringStyle: 'classic',
       standards: [],
       systemPrompt: '',
@@ -775,9 +775,9 @@ export default function EditorPage() {
         <aside className="border-r bg-background flex flex-col" role="complementary" aria-label="Left sidebar">
           <div className="p-2 border-b flex items-center justify-between">
             <div className="text-sm font-medium">Pages</div>
-            <button className="px-2 py-1 text-sm border rounded" onClick={() => {
-              const id = crypto.randomUUID();
-              const p: Page = { id, title: "New Page", orientation: "portrait", marginInches: 0.5, bwThreshold: 200, pageType: 'worksheet', coloringStyle: 'classic', standards: [], systemPrompt: '', systemPromptEdited: false };
+              <button className="px-2 py-1 text-sm border rounded" onClick={() => {
+                const id = crypto.randomUUID();
+              const p: Page = { id, title: "New Page", orientation: "portrait", marginInches: 0.5, bwThreshold: 200, pageType: 'coloring', coloringStyle: 'classic', standards: [], systemPrompt: '', systemPromptEdited: false };
               setPages((ps) => ps.concat(p));
               setCurrentPageId(id);
             }}>New</button>
@@ -861,16 +861,16 @@ export default function EditorPage() {
               <section>
                 <h3 className="text-sm font-medium text-muted-foreground">Type & Style</h3>
                 <div className="mt-2 grid gap-2">
-                  <div className="flex items-center gap-3">
-                    <label className="flex items-center gap-1 text-sm">
-                      <input type="radio" name="pagetype" checked={(currentPage?.pageType || 'worksheet') === 'worksheet'} onChange={() => setPagePatch(currentPageId!, { pageType: 'worksheet' })} />
-                      Worksheet
-                    </label>
-                    <label className="flex items-center gap-1 text-sm">
-                      <input type="radio" name="pagetype" checked={(currentPage?.pageType || 'worksheet') === 'coloring'} onChange={() => setPagePatch(currentPageId!, { pageType: 'coloring' })} />
-                      Coloring Book
-                    </label>
-                  </div>
+                <div className="flex items-center gap-3">
+                  <label className="flex items-center gap-1 text-sm">
+                    <input type="radio" name="pagetype" checked={(currentPage?.pageType || 'coloring') === 'coloring'} onChange={() => setPagePatch(currentPageId!, { pageType: 'coloring' })} />
+                    Coloring Book
+                  </label>
+                  <label className="flex items-center gap-1 text-sm">
+                    <input type="radio" name="pagetype" checked={(currentPage?.pageType || 'coloring') === 'worksheet'} onChange={() => setPagePatch(currentPageId!, { pageType: 'worksheet' })} />
+                    Worksheet (beta)
+                  </label>
+                </div>
                   {(currentPage?.pageType || 'worksheet') === 'coloring' ? (
                     <div className="grid gap-1">
                       <label htmlFor="coloring-style">Style</label>
