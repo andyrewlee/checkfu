@@ -65,7 +65,7 @@ export default function PagePreview({
 
       {/* Safe margin dashed rectangle */}
       <div
-        className="absolute border-2 border-dashed border-slate-300 pointer-events-none"
+        className="absolute border border-dashed border-slate-300/70 pointer-events-none"
         style={{
           left: m + 1,
           top: m + 1,

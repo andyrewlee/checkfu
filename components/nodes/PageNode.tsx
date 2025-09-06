@@ -40,14 +40,14 @@ function PageNode({ data, selected }: NodeProps<PageRFNode>) {
 
   return (
     <div
-      className={`rounded-md border bg-white/95 backdrop-blur-sm shadow-sm ${
+      className={`rounded-md border border-slate-200 bg-white/95 backdrop-blur-sm shadow-sm hover:shadow-md transition-shadow ${
         selected ? "ring-2 ring-blue-500" : ""
       }`}
       style={{ width: dims.w + 16, padding: 8 }}
     >
       {/* Handles for connecting/branching (top target centered, bottom source centered). */}
-      <Handle type="target" position={Position.Top} style={{ background: "#64748b", left: "50%", transform: "translate(-50%, 0)" }} />
-      <Handle type="source" position={Position.Bottom} style={{ background: "#64748b", left: "50%", transform: "translate(-50%, 0)" }} />
+      <Handle type="target" position={Position.Top} style={{ background: "#94a3b8", left: "50%", transform: "translate(-50%, 0)" }} />
+      <Handle type="source" position={Position.Bottom} style={{ background: "#94a3b8", left: "50%", transform: "translate(-50%, 0)" }} />
 
       <div
         className="flex items-center justify-between mb-2 select-none"
@@ -79,7 +79,7 @@ function PageNode({ data, selected }: NodeProps<PageRFNode>) {
       </div>
 
       {/* NodeToolbar for branching: prompt input + action */}
-      <NodeToolbar isVisible={selected} position={Position.Bottom} className="nodrag nopan nowheel" style={{ pointerEvents: 'all', zIndex: 1000 }}>
+      <NodeToolbar isVisible={selected} position={Position.Bottom} offset={8} className="nodrag nopan nowheel" style={{ pointerEvents: 'all', zIndex: 1000 }}>
         <div className="flex items-center gap-2 bg-white/95 border rounded shadow-sm px-2 py-1">
           <input
             type="text"
