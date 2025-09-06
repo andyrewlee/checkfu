@@ -69,10 +69,12 @@ function PageNode({ data, selected }: NodeProps<PageRFNode>) {
       <div className="relative overflow-hidden bg-slate-50 border" style={{ width: dims.w, height: dims.h }}>
         <PagePreview orientation={data.orientation} marginInches={data.marginInches} imageUrl={data.imageUrl} />
         {data.loading ? (
-          <div className="absolute inset-0 grid place-items-center bg-white/40 pointer-events-none select-none">
-            <div className="flex items-center gap-2 text-xs text-slate-700">
-              <div className="h-4 w-4 rounded-full border-2 border-slate-400 border-t-transparent animate-spin" />
-              <span>{data.loadingText || 'Generating…'}</span>
+          <div className="absolute inset-0 grid place-items-center bg-white/70 pointer-events-none select-none">
+            <div className="flex items-center gap-3 px-3 py-2 rounded-md bg-white shadow ring-1 ring-slate-300">
+              <div className="h-5 w-5 rounded-full border-2 border-sky-600 border-t-transparent animate-spin" />
+              <span className="text-sm font-semibold text-slate-900 tracking-wide">
+                {data.loadingText || 'Generating…'}
+              </span>
             </div>
           </div>
         ) : null}

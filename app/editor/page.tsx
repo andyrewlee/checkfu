@@ -22,7 +22,7 @@ type Page = {
   systemPromptEdited?: boolean;
   bwThreshold?: number; // 0-255
   pageType?: 'worksheet' | 'coloring';
-  coloringStyle?: 'classic' | 'anime' | 'retro' | 'storybook';
+  coloringStyle?: 'classic' | 'anime' | 'retro';
   standards?: string[];
   generating?: boolean;
   status?: string;
@@ -71,12 +71,21 @@ export default function EditorPage() {
   }, []);
   const [toasts, setToasts] = useState<{ id: string; kind: 'error'|'info'|'success'; text: string }[]>([]);
   const lastQuickGenAtRef = useRef<number>(0);
+  const [needsApiKey, setNeedsApiKey] = useState(false);
   // Keep current page visible in the sidebar
   useEffect(() => {
     if (!currentPageId) return;
     const el = document.getElementById(`page-item-${currentPageId}`);
     if (el) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   }, [currentPageId]);
+  // Highlight API key button if missing key
+  useEffect(() => {
+    try {
+      if (typeof window !== 'undefined') {
+        setNeedsApiKey(!localStorage.getItem('CHECKFU_GEMINI_API_KEY'));
+      }
+    } catch {}
+  }, [showSettings]);
   // Inpainting disabled for now
 
   // Memoize nodeTypes to avoid React Flow warning about new object each render
@@ -125,8 +134,8 @@ export default function EditorPage() {
   const onNodesChange = (changes: NodeChange<PageRFNode>[]) => {
     const removedIds = new Set(
       changes
-        .filter((c) => c.type === 'remove')
-        .map((c) => (c as any).id as string)
+        .filter((c): c is { type: 'remove'; id: string } => (c as unknown as { type: string }).type === 'remove')
+        .map((c) => c.id)
         .filter(Boolean)
     );
     setNodes((ns) => applyNodeChanges<PageRFNode>(changes, ns));
@@ -169,7 +178,7 @@ export default function EditorPage() {
     const img = new Image();
     img.crossOrigin = 'anonymous';
     await new Promise<void>((res, rej) => { img.onload = () => res(); img.onerror = () => rej(new Error('load failed')); img.src = url; });
-    const rT = pxW / pxH;
+    // aspect ratio target (not used with contain placement)
 
     // First, auto-trim outer white margins from the source to remove unnecessary gutters around content.
     const srcCanvas = document.createElement('canvas');
@@ -309,9 +318,7 @@ export default function EditorPage() {
         ? "Style: anime for children. Clean inked outlines, friendly faces, very large fill areas. No screen tones."
         : styleName === "retro"
           ? "Style: retro nineteen sixty cartoon look. Bold contour lines, simple geometry, playful characters."
-          : styleName === "storybook"
-            ? "Style: classic western storybook line drawing. Pen and ink look with simple contours and friendly proportions."
-            : "Style: classic coloring book. Bold outlines and large closed regions that are easy to color.";
+          : "Style: classic coloring book. Bold outlines and large closed regions that are easy to color.";
 
     const col = [
       "Purpose: a kid friendly coloring page with one clear subject and readable shapes.",
@@ -742,6 +749,7 @@ export default function EditorPage() {
       <header className="h-14 px-4 border-b border-slate-200 bg-sky-50/60 backdrop-blur flex items-center justify-between" role="toolbar" aria-label="Editor top bar">
         <div className="flex items-center gap-3">
           <span className="font-semibold">Checkfu</span>
+          <span className="text-sm text-slate-700">personalized learning materials for kindergartners</span>
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -762,12 +770,17 @@ export default function EditorPage() {
               </span>
             ) : null}
           </button>
-          <button className="px-3 py-1.5 rounded-md border text-sm inline-flex items-center gap-2" aria-label="Settings" title="Settings" onClick={() => setShowSettings(true)}>
+          <button
+            className={`px-3 py-1.5 rounded-md border text-sm inline-flex items-center gap-2 ${needsApiKey ? 'border-amber-400 bg-amber-50 text-amber-800' : ''}`}
+            aria-label="Settings"
+            title={needsApiKey ? 'Add your Gemini API key to generate images' : 'API Key'}
+            onClick={() => setShowSettings(true)}
+          >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
               <circle cx="12" cy="12" r="3"></circle>
               <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06A2 2 0 1 1 7.04 2.4l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c0 .63.37 1.2.95 1.45.33.14.68.27 1.05.37" />
             </svg>
-            API Key
+            {needsApiKey ? 'Add API Key' : 'API Key'}
           </button>
         </div>
       </header>
@@ -882,7 +895,16 @@ export default function EditorPage() {
             <div className="space-y-6 text-sm">
               {/* Page Type & Styles */}
               <section>
-                <h3 className="text-sm font-medium text-muted-foreground">Type & Style</h3>
+                <h3 className="text-sm font-semibold text-slate-700 flex items-center gap-2">
+                  Type & Style
+                  <span className="text-slate-400" title="Choose worksheet or coloring book. For coloring, pick a style for line weight and shapes.">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                      <circle cx="12" cy="12" r="10"></circle>
+                      <line x1="12" y1="16" x2="12" y2="12"></line>
+                      <line x1="12" y1="8" x2="12" y2="8"></line>
+                    </svg>
+                  </span>
+                </h3>
                 <div className="mt-2 grid gap-2">
                 <div className="flex items-center gap-3">
                   <label className="flex items-center gap-1 text-sm">
@@ -901,7 +923,6 @@ export default function EditorPage() {
                         <option value="classic">Classic</option>
                         <option value="anime">Anime</option>
                         <option value="retro">Retro</option>
-                        <option value="storybook">Storybook</option>
                       </select>
                     </div>
                   ) : null}
@@ -909,7 +930,16 @@ export default function EditorPage() {
               </section>
 
               <section>
-                <h3 className="text-sm font-medium text-muted-foreground">Page</h3>
+                <h3 className="text-sm font-semibold text-slate-700 flex items-center gap-2">
+                  Page
+                  <span className="text-slate-400" title="Set title, orientation, and printable margins.">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                      <circle cx="12" cy="12" r="10"></circle>
+                      <line x1="12" y1="16" x2="12" y2="12"></line>
+                      <line x1="12" y1="8" x2="12" y2="8"></line>
+                    </svg>
+                  </span>
+                </h3>
                 <div className="mt-2 grid gap-2">
                   <label htmlFor="page-title">Title</label>
                   <input id="page-title" className="border rounded px-2 py-1" value={currentPage?.title || ""} onChange={(e) => setPagePatch(currentPageId!, { title: e.target.value })} />
@@ -926,7 +956,16 @@ export default function EditorPage() {
               {/* Standards (K only) for worksheets */}
               {(currentPage?.pageType || 'worksheet') === 'worksheet' ? (
                 <section>
-                  <h3 className="text-sm font-medium text-muted-foreground">Standards (K)</h3>
+                  <h3 className="text-sm font-semibold text-slate-700 flex items-center gap-2">
+                    Standards (K)
+                    <span className="text-slate-400" title="Optional: select Common Core Kindergarten standards to guide worksheet prompts.">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                        <circle cx="12" cy="12" r="10"></circle>
+                        <line x1="12" y1="16" x2="12" y2="12"></line>
+                        <line x1="12" y1="8" x2="12" y2="8"></line>
+                      </svg>
+                    </span>
+                  </h3>
                   <div className="mt-2 grid gap-2">
                     <input
                       type="text"
@@ -959,15 +998,22 @@ export default function EditorPage() {
               ) : null}
 
               {/* Prompts */}
-              <section>
-                <h3 className="text-sm font-medium text-muted-foreground">Prompts</h3>
+            <section>
+              <h3 className="text-sm font-semibold text-slate-700 flex items-center gap-2">
+                Prompts
+                <span className="text-slate-400" title="System Prompt sets rules and structure. Prompt adds specific instructions for this page.">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <line x1="12" y1="16" x2="12" y2="12"></line>
+                    <line x1="12" y1="8" x2="12" y2="8"></line>
+                  </svg>
+                </span>
+              </h3>
                 <div className="mt-2 grid gap-3 text-sm">
                   <div className="grid gap-1">
                     <label htmlFor="sys-prompt">System Prompt</label>
                     <textarea id="sys-prompt" className="border rounded px-2 py-1 h-24" placeholder="Base instructions" value={currentPage?.systemPrompt || ''} onChange={(e) => setPagePatch(currentPageId!, { systemPrompt: e.target.value, systemPromptEdited: true })} />
-                    <div>
-                      <button className="px-2 py-1 border rounded" onClick={() => { setPagePatch(currentPageId!, { systemPrompt: computeSystemPrompt(currentPage!), systemPromptEdited: false }); }}>Refresh from selections</button>
-                    </div>
+                  
                   </div>
                   <div className="grid gap-1">
                     <label htmlFor="gen-prompt">Prompt</label>
@@ -1035,7 +1081,7 @@ export default function EditorPage() {
           <div className="bg-white text-black rounded-md shadow-lg p-4 w-[420px] max-w-[90vw]">
             <h2 className="font-semibold mb-3">Gemini API Key</h2>
             <p className="text-sm text-slate-600 mb-2">Stored in localStorage (use at your own risk).</p>
-            <input id="apikey" className="border rounded px-2 py-1 w-full mb-2" placeholder="Enter CHECKFU_GEMINI_API_KEY" defaultValue={typeof window !== 'undefined' ? (localStorage.getItem('CHECKFU_GEMINI_API_KEY') || '') : ''} />
+            <input id="apikey" className="border rounded px-2 py-1 w-full mb-2" placeholder="GEMINI_API_KEY" defaultValue={typeof window !== 'undefined' ? (localStorage.getItem('CHECKFU_GEMINI_API_KEY') || '') : ''} />
             <div className="flex justify-end gap-2">
               <button className="px-2 py-1 border rounded" onClick={() => { localStorage.removeItem('CHECKFU_GEMINI_API_KEY'); setShowSettings(false); }}>Clear</button>
               <button className="px-2 py-1 border rounded" onClick={() => { const el = document.getElementById('apikey') as HTMLInputElement | null; if (el) localStorage.setItem('CHECKFU_GEMINI_API_KEY', el.value || ''); setShowSettings(false); }}>Save</button>
