@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import "@xyflow/react/dist/style.css";
-import ConvexClientProvider from "@/components/ConvexClientProvider";
-import { ClerkProvider } from "@clerk/nextjs";
+// import ConvexClientProvider from "@/components/ConvexClientProvider";
+// import { ClerkProvider } from "@clerk/nextjs";
 
 // Toggle Clerk on/off (set to true to re-enable when ready)
 // This hides the "Clerk is in keyless mode" banner without removing code.
