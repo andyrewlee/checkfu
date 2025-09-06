@@ -23,6 +23,9 @@ export type PageNodeData = {
   onQuickGenerate?: (pageId: string) => void;
   imageUrl?: string;
   onSetImageUrl?: (pageId: string, url: string) => void;
+  // Visual status
+  loading?: boolean;
+  loadingText?: string;
 };
 
 type PageRFNode = RFNode<PageNodeData, 'page'>;
@@ -65,6 +68,14 @@ function PageNode({ data, selected }: NodeProps<PageRFNode>) {
       {/* Page preview only (no direct interaction on node) */}
       <div className="relative overflow-hidden bg-slate-50 border" style={{ width: dims.w, height: dims.h }}>
         <PagePreview orientation={data.orientation} marginInches={data.marginInches} imageUrl={data.imageUrl} />
+        {data.loading ? (
+          <div className="absolute inset-0 grid place-items-center bg-white/40 pointer-events-none select-none">
+            <div className="flex items-center gap-2 text-xs text-slate-700">
+              <div className="h-4 w-4 rounded-full border-2 border-slate-400 border-t-transparent animate-spin" />
+              <span>{data.loadingText || 'Generating…'}</span>
+            </div>
+          </div>
+        ) : null}
       </div>
 
       {/* NodeToolbar for branching: prompt input + action */}

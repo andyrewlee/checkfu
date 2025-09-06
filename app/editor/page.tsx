@@ -24,6 +24,8 @@ type Page = {
   pageType?: 'worksheet' | 'coloring';
   coloringStyle?: 'classic' | 'anime' | 'retro' | 'storybook';
   standards?: string[];
+  generating?: boolean;
+  status?: string;
 };
 
 // EditorPage: Node-based generator for printable K–1 pages.
@@ -75,8 +77,7 @@ export default function EditorPage() {
     const el = document.getElementById(`page-item-${currentPageId}`);
     if (el) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   }, [currentPageId]);
-  // Inpainting modal state
-  const [showInpaint, setShowInpaint] = useState(false);
+  // Inpainting disabled for now
 
   // Memoize nodeTypes to avoid React Flow warning about new object each render
   const nodeTypes = useMemo<NodeTypes>(() => ({ page: PageNode as any }), []);
@@ -99,6 +100,8 @@ export default function EditorPage() {
         orientation: p.orientation,
         marginInches: p.marginInches,
         imageUrl: p.imageUrl,
+        loading: !!p.generating,
+        loadingText: p.status,
         onBranch: (pid) => branchFrom(pid),
         onBranchWithPrompt: (pid, prompt) => branchFromWithPrompt(pid, prompt),
         onDelete: (pid) => deleteNode(pid),
@@ -119,8 +122,31 @@ export default function EditorPage() {
     );
   }, [pages, currentPageId]);
 
-  const onNodesChange = (changes: NodeChange<PageRFNode>[]) =>
+  const onNodesChange = (changes: NodeChange<PageRFNode>[]) => {
+    const removedIds = new Set(
+      changes
+        .filter((c) => c.type === 'remove')
+        .map((c) => (c as any).id as string)
+        .filter(Boolean)
+    );
     setNodes((ns) => applyNodeChanges<PageRFNode>(changes, ns));
+    if (removedIds.size) {
+      setPages((ps) => {
+        const filtered = ps.filter((p) => !removedIds.has(p.id));
+        setCurrentPageId((prev) => (prev && removedIds.has(prev) ? filtered[0]?.id ?? null : prev));
+        return filtered;
+      });
+      setEdges((es) => es.filter((e) => !removedIds.has(e.source) && !removedIds.has(e.target)));
+    }
+  };
+
+  function deleteNodes(ids: string[]) {
+    if (!ids.length) return;
+    setEdges((es) => es.filter((e) => !ids.includes(e.source) && !ids.includes(e.target)));
+    setPages((ps) => ps.filter((p) => !ids.includes(p.id)));
+    setNodes((ns) => ns.filter((n) => !ids.includes(n.id)));
+    setCurrentPageId((prev) => (prev && ids.includes(prev) ? (pages.find((p) => !ids.includes(p.id))?.id ?? null) : prev));
+  }
 
   function setPagePatch(id: string, patch: Partial<Page>) {
     setPages((ps) => ps.map((p) => (p.id === id ? { ...p, ...patch } : p)));
@@ -191,7 +217,7 @@ export default function EditorPage() {
     let sw = Math.max(1, right - left + 1), sh = Math.max(1, bottom - top + 1);
 
     // Lightly crop inside any heavy border lines by a few pixels (bleed), if the trim changed the rect.
-    const bleed = 4;
+    const bleed = 0; // avoid cropping into heavy border lines
     if (sw < img.width || sh < img.height) {
       sx = Math.min(Math.max(0, sx + bleed), img.width - 1);
       sy = Math.min(Math.max(0, sy + bleed), img.height - 1);
@@ -199,59 +225,110 @@ export default function EditorPage() {
       sh = Math.max(1, Math.min(img.height - sy, sh - bleed * 2));
     }
 
-    // Now apply cover-crop within the trimmed rect to match the printable aspect ratio exactly.
-    const rS = sw / sh;
-    if (!isFinite(rS) || sw === 0 || sh === 0) {
-      // fallback: contain
-      const c = document.createElement('canvas'); c.width = pxW; c.height = pxH; const ctx = c.getContext('2d'); if (!ctx) return url;
-      ctx.fillStyle = '#ffffff'; ctx.fillRect(0,0,pxW,pxH);
-      const scale = Math.min(pxW / Math.max(1, img.width), pxH / Math.max(1, img.height));
-      const dw = Math.round(img.width * scale), dh = Math.round(img.height * scale);
-      const dx = Math.floor((pxW - dw)/2), dy = Math.floor((pxH - dh)/2);
-      ctx.drawImage(img, 0, 0, img.width, img.height, dx, dy, dw, dh);
-      return c.toDataURL('image/png');
-    }
-    if (rS > rT) {
-      // source wider → crop width inside trimmed rect
-      const newSw = Math.round(sh * rT);
-      sx = Math.floor(sx + (sw - newSw) / 2);
-      sw = newSw;
-    } else if (rS < rT) {
-      // source taller → crop height inside trimmed rect
-      const newSh = Math.round(sw / rT);
-      sy = Math.floor(sy + (sh - newSh) / 2);
-      sh = newSh;
-    }
+    // Now place the trimmed rect using CONTAIN (no further cropping) with a small inner padding.
     const c = document.createElement('canvas'); c.width = pxW; c.height = pxH;
     const ctx = c.getContext('2d'); if (!ctx) return url;
     ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(img, sx, sy, sw, sh, 0, 0, pxW, pxH);
+    // breathing room inside printable area so content never touches the margins
+    const pad = Math.max(6, Math.round(Math.min(pxW, pxH) * 0.02));
+    const availW = Math.max(1, pxW - 2 * pad);
+    const availH = Math.max(1, pxH - 2 * pad);
+    const scale = Math.min(availW / Math.max(1, sw), availH / Math.max(1, sh));
+    const dw = Math.max(1, Math.round(sw * scale));
+    const dh = Math.max(1, Math.round(sh * scale));
+    const dx = pad + Math.floor((availW - dw) / 2);
+    const dy = pad + Math.floor((availH - dh) / 2);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, pxW, pxH);
+    ctx.drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh);
     return c.toDataURL('image/png');
   }
 
-  // Build an explicit, printing-oriented System Prompt from selections
+  // Build an explicit, print oriented System Prompt from selections
   function computeSystemPrompt(p: Page): string {
-    const isWorksheet = (p.pageType || 'worksheet') === 'worksheet';
+    const isWorksheet = (p.pageType || "worksheet") === "worksheet";
+
+    // Orientation and margins for letter
+    const letter = p.orientation === "landscape" ? "11×8.5 landscape" : "8.5×11 portrait";
+    const margin = (p.marginInches ?? 0.5).toFixed(2);
+
+    // Shared print rules for Nano Banana
+    const printRules = [
+      `Print target: US Letter ${letter}. Keep all content inside ${margin} inch margins.`,
+      "Output: one black and white line art image for print.",
+      "Style: thick uniform outlines, high contrast, large closed shapes. No gray tones. No shading. No halftones. No photo textures.",
+      "Background: white only.",
+      "Exclusions: no frames, borders, watermarks, signatures, logos, or captions.",
+      "Aspect: do not change the provided orientation.",
+      "If a mask is provided, change only masked regions and keep all unmasked regions identical."
+    ].join(" ");
+
     if (isWorksheet) {
-      const selected = (p.standards || []);
-      const codes = selected.join(', ');
+      // Standards summary
+      const selected = p.standards || [];
+      const codes = selected.join(", ");
       const lookup = new Map(standardsCatalog.map(s => [s.code, s.description] as const));
-      const descs = selected.map(code => `${code}: ${lookup.get(code) || ''}`).filter(Boolean);
-      const cc = codes ? `Common Core Kindergarten focus: ${codes}. ` : 'Common Core Kindergarten math practices. ';
-      const ccDetail = descs.length ? `Target standards details: ${descs.join('; ')}. ` : '';
-      const goal = 'Design a solvable, self-contained worksheet a kindergarten student can complete independently. Provide a single clear task/instruction and space to answer. Use concrete visual math tools (ten frames, number lines, dot cards, simple manipulatives). Quantities ≤ 10. '; 
-      const layout = 'Balance composition for print. Include obvious answer areas (blank boxes/frames/lines) with ample white space. Keep one main task per page. High contrast. Fill the printable area inside margins; avoid borders, frames, titles, or page headers.'; 
-      const style = 'Black ink line art only. Thick outlines. White background. No shading or gray. Letter-size proportion (8.5×11). No decorative frames or captions. Minimal text; numerals OK.';
-      return `${cc}${ccDetail}${goal}${layout}${style}`.trim();
-    } else {
-      const styleName = p.coloringStyle || 'classic';
-      const styleText = styleName === 'anime' ? 'Anime style; clean inked outlines; large fill areas.'
-        : styleName === 'retro' ? 'Retro 1960s cartoon style; bold outlines; simple shapes.'
-        : styleName === 'storybook' ? 'Classic Western storybook sketch style; bold outlines; simple shapes.'
-        : 'Classic coloring book style; bold outlines; large shapes.';
-      const base = 'Black ink line art only. White background. No shading or gray. Letter-size proportion (8.5×11). Fill the printable area inside margins. Do not include frames, borders, titles, or headers.';
-      return `${styleText} ${base}`.trim();
+      const descs = selected
+        .map(code => {
+          const d = lookup.get(code) || "";
+          return d ? `${code}: ${d}` : "";
+        })
+        .filter(Boolean);
+
+      const ccSummary = codes
+        ? `Common Core Kindergarten focus: ${codes}. `
+        : "Common Core Kindergarten math practices. ";
+      const ccDetail = descs.length ? `Target standards: ${descs.join("; ")}. ` : "";
+
+      // Worksheet specific guidance for K
+      const wk = [
+        "Purpose: a solvable worksheet that a kindergarten student can complete independently.",
+        "1) Provide exactly one short instruction line at the top in simple English.",
+        "2) Use concrete visual math tools such as ten frames, number lines, dot cards, or simple manipulatives.",
+        "3) Quantities never exceed 10. Prefer numerals for labels and examples.",
+        "4) Use three to six tasks or one main task with three to six parts.",
+        "5) Provide large answer areas about 1.25 inch squares or lines with generous white space.",
+        "6) Layout flows from left to right and then top to bottom. Keep balance and clarity.",
+        "7) High contrast line art suitable for printing."
+      ].join(" ");
+
+      const wkNegatives = [
+        "Do not add titles or headers.",
+        "Do not add decorative frames.",
+        "Do not place elements on or past the margins.",
+        "Do not include stickers, emojis, photographs, or gray fills."
+      ].join(" ");
+
+      return `${ccSummary}${ccDetail}${wk} ${printRules} ${wkNegatives}`.trim();
     }
+
+    // Coloring page styles
+    const styleName = p.coloringStyle || "classic";
+    const styleText =
+      styleName === "anime"
+        ? "Style: anime for children. Clean inked outlines, friendly faces, very large fill areas. No screen tones."
+        : styleName === "retro"
+          ? "Style: retro nineteen sixty cartoon look. Bold contour lines, simple geometry, playful characters."
+          : styleName === "storybook"
+            ? "Style: classic western storybook line drawing. Pen and ink look with simple contours and friendly proportions."
+            : "Style: classic coloring book. Bold outlines and large closed regions that are easy to color.";
+
+    const col = [
+      "Purpose: a kid friendly coloring page with one clear subject and readable shapes.",
+      "1) Composition fills the printable area while preserving balanced white space.",
+      "2) Use thick outlines and closed shapes to avoid tiny slivers.",
+      "3) No text at all.",
+      "4) High contrast line art that prints cleanly."
+    ].join(" ");
+
+    const colNegatives = [
+      "Do not use gray tones or shading.",
+      "Do not use fine hatching or dense patterns.",
+      "Do not add borders, titles, captions, watermarks, or logos.",
+      "Do not place elements on or past the margins."
+    ].join(" ");
+
+    return `${styleText} ${col} ${printRules} ${colNegatives}`.trim();
   }
 
   // Auto-refresh system prompt when selections change unless edited
@@ -262,7 +339,7 @@ export default function EditorPage() {
       const sys = computeSystemPrompt(p);
       return { ...p, systemPrompt: sys };
     }));
-  }, [currentPage?.pageType, currentPage?.coloringStyle, (currentPage?.standards || []).join('|')]);
+  }, [currentPage?.pageType, currentPage?.coloringStyle, currentPage?.orientation, currentPage?.marginInches, (currentPage?.standards || []).join('|')]);
 
   function addPageFromImage(url: string, title = "Image", overrides?: Partial<Page>): string {
     const id = crypto.randomUUID();
@@ -306,11 +383,16 @@ export default function EditorPage() {
     const parent = pages.find((p) => p.id === parentId);
     if (!parent) return;
     const id = crypto.randomUUID();
-    const child: Page = { ...parent, id, title: `${parent.title} variant`, prompt };
+    const child: Page = { ...parent, id, title: `${parent.title} variant`, prompt, generating: true, status: 'Transforming…' };
     const parentNode = nodes.find((n) => n.id === parentId);
     const newPos = parentNode ? { x: parentNode.position.x, y: parentNode.position.y + 480 } : { x: 0, y: 480 };
     setPages((ps) => ps.concat(child));
-    setNodes((ns) => ns.concat(buildNode(child, newPos)));
+    setNodes((ns) => {
+      // unselect all existing nodes and add the new one as selected
+      const cleared = ns.map((n) => ({ ...n, selected: false }));
+      const newNode = buildNode(child, newPos);
+      return cleared.concat({ ...newNode, selected: true });
+    });
     setEdges((es) => es.concat({ id: crypto.randomUUID(), source: parentId, target: id }));
     setCurrentPageId(id);
     await generateChildFromParent(id, parent, prompt);
@@ -350,6 +432,7 @@ export default function EditorPage() {
     const baseUrl = parent.originalImageUrl || parent.imageUrl;
     // Draft child page object to avoid relying on asynchronous state updates
     const childDraft: Page = { ...parent, id: childId, prompt };
+    setPagePatch(childId, { generating: true, status: 'Transforming…' });
     if (baseUrl) {
       try {
         setGenerating(true);
@@ -358,7 +441,7 @@ export default function EditorPage() {
         const { transformImageWithPrompt } = await import('@/lib/nanoBanana');
         const rawUrl = await transformImageWithPrompt(baseB64, instruction);
         const fitted = await fitImageToPrintableArea(rawUrl, childDraft);
-        setPagePatch(childId, { imageUrl: fitted, originalImageUrl: fitted });
+        setPagePatch(childId, { imageUrl: fitted, originalImageUrl: fitted, generating: false, status: '' });
         return;
       } catch (e) {
         console.warn('Transform failed; falling back to generate', e);
@@ -367,6 +450,7 @@ export default function EditorPage() {
         setGenerating(false);
       }
     }
+    setPagePatch(childId, { generating: true, status: 'Generating…' });
     await generateInto(childId, prompt, childDraft);
   }
 
@@ -380,6 +464,7 @@ export default function EditorPage() {
     try {
       setGenerating(true);
       const page = pageOverride ?? pages.find(p => p.id === pageId)!;
+      setPagePatch(pageId, { generating: true, status: 'Generating…' });
       const instruction = buildInstructionPrompt(page, prompt);
       const { generateColoringBookImage } = await import("@/lib/nanoBanana");
       const rawUrl = await generateColoringBookImage(instruction);
@@ -390,56 +475,18 @@ export default function EditorPage() {
         try {
           if (prev.originalImageUrl && prev.originalImageUrl.startsWith('blob:') && prev.originalImageUrl !== rawUrl) URL.revokeObjectURL(prev.originalImageUrl);
           if (prev.imageUrl && prev.imageUrl.startsWith('blob:') && prev.imageUrl !== rawUrl) URL.revokeObjectURL(prev.imageUrl);
-        } catch {}
+        } catch { }
       }
-      setPagePatch(pageId, { imageUrl: fitted, originalImageUrl: fitted });
+      setPagePatch(pageId, { imageUrl: fitted, originalImageUrl: fitted, generating: false, status: '' });
     } catch (err) {
       pushToast((err as Error).message || 'Failed to generate image', 'error');
+      setPagePatch(pageId, { generating: false, status: '' });
     } finally {
       setGenerating(false);
     }
   }
 
-  async function applyInpainting(maskCanvas: HTMLCanvasElement, invert: boolean) {
-    const page = currentPageId ? pages.find(p => p.id === currentPageId) : null;
-    if (!page || !page.imageUrl) { pushToast('No base image to inpaint', 'error'); return; }
-    try {
-      setGenerating(true);
-      // Base at the same size as overlay to ensure alignment
-      const baseImg = new Image(); baseImg.crossOrigin = 'anonymous';
-      await new Promise<void>((res, rej) => { baseImg.onload = () => res(); baseImg.onerror = () => rej(new Error('load base failed')); baseImg.src = page.imageUrl!; });
-      const bc = document.createElement('canvas'); bc.width = maskCanvas.width; bc.height = maskCanvas.height;
-      const bctx = bc.getContext('2d')!; bctx.fillStyle='#fff'; bctx.fillRect(0,0,bc.width,bc.height);
-      // Fit base image to overlay canvas
-      const scale = Math.min(bc.width / baseImg.width, bc.height / baseImg.height);
-      const dw = Math.round(baseImg.width * scale), dh = Math.round(baseImg.height * scale);
-      const dx = Math.floor((bc.width - dw) / 2), dy = Math.floor((bc.height - dh) / 2);
-      bctx.drawImage(baseImg, dx, dy, dw, dh);
-      const baseB64 = bc.toDataURL('image/png').replace(/^data:image\/png;base64,/, '');
-      // Mask PNG b64
-      let maskData: ImageData | null = null;
-      try { maskData = maskCanvas.getContext('2d')!.getImageData(0, 0, maskCanvas.width, maskCanvas.height); } catch {}
-      if (!maskData) { pushToast('Empty mask', 'error'); return; }
-      // Build BW mask: black background, white where overlay alpha > 0 (optionally invert)
-      const mc = document.createElement('canvas'); mc.width = maskCanvas.width; mc.height = maskCanvas.height;
-      const mctx = mc.getContext('2d')!; mctx.fillStyle = '#000'; mctx.fillRect(0,0,mc.width,mc.height);
-      const src = maskData.data; const dst = mctx.getImageData(0,0,mc.width,mc.height); const dd = dst.data;
-      for (let i=0;i<dd.length;i+=4) { const a = src[i+3]; const on = (a>0) ? 255 : 0; const v = invert ? 255-on : on; dd[i]=dd[i+1]=dd[i+2]=v; dd[i+3]=255; }
-      mctx.putImageData(dst, 0, 0);
-      const maskB64 = mc.toDataURL('image/png').replace(/^data:image\/png;base64,/, '');
-      const instruction = buildInstructionPrompt(page, page.prompt || '');
-      const { editImageWithMaskGuidance } = await import('@/lib/nanoBanana');
-      const rawUrl = await editImageWithMaskGuidance(baseB64, maskB64, instruction);
-      const fitted = await fitImageToPrintableArea(rawUrl, page);
-      setPagePatch(currentPageId!, { imageUrl: fitted, originalImageUrl: fitted });
-      pushToast('Inpainting applied', 'success');
-    } catch (e) {
-      pushToast((e as Error).message || 'Inpainting failed', 'error');
-    } finally {
-      setGenerating(false);
-      setShowInpaint(false);
-    }
-  }
+  // Inpainting disabled for now
 
   function deleteNode(pageId: string) {
     if (!confirm("Delete this node?")) return;
@@ -541,18 +588,19 @@ export default function EditorPage() {
         if (currentPageId) quickGenerate(currentPageId);
         return;
       }
-      // Delete key to delete selected/current node (not while typing)
+      // Delete key: delete selected nodes or current node (not while typing)
       if (!editing && (e.key === 'Delete' || e.key === 'Backspace')) {
         e.preventDefault();
-        if (currentPageId) deleteNode(currentPageId);
+        const selected = nodes.filter((n) => n.selected).map((n) => n.id);
+        if (selected.length > 1) {
+          // batch delete
+          deleteNodes(selected);
+        } else if (currentPageId) {
+          deleteNode(currentPageId);
+        }
         return;
       }
-      // Inpainting modal with "i" (not while typing)
-      if (!editing && e.key.toLowerCase() === 'i' && currentPageId) {
-        e.preventDefault();
-        setShowInpaint(true);
-        return;
-      }
+      // Inpainting disabled
     };
     window.addEventListener('keydown', onKeyDown);
     return () => { window.removeEventListener("paste", onPaste); window.removeEventListener('keydown', onKeyDown); };
@@ -594,7 +642,7 @@ export default function EditorPage() {
     // revoke previous processed URL if it was an object URL
     try {
       if (page.imageUrl && page.imageUrl.startsWith('blob:')) URL.revokeObjectURL(page.imageUrl);
-    } catch {}
+    } catch { }
     setPagePatch(pageId, { imageUrl: url, bwThreshold: threshold });
   }
 
@@ -727,8 +775,8 @@ export default function EditorPage() {
         <aside className="border-r bg-background flex flex-col" role="complementary" aria-label="Left sidebar">
           <div className="p-2 border-b flex items-center justify-between">
             <div className="text-sm font-medium">Pages</div>
-              <button className="px-2 py-1 text-sm border rounded" onClick={() => {
-                const id = crypto.randomUUID();
+            <button className="px-2 py-1 text-sm border rounded" onClick={() => {
+              const id = crypto.randomUUID();
               const p: Page = { id, title: "New Page", orientation: "portrait", marginInches: 0.5, bwThreshold: 200, pageType: 'worksheet', coloringStyle: 'classic', standards: [], systemPrompt: '', systemPromptEdited: false };
               setPages((ps) => ps.concat(p));
               setCurrentPageId(id);
@@ -808,146 +856,128 @@ export default function EditorPage() {
               Create your first page with the New button or drop/paste an image.
             </div>
           ) : (
-          <div className="space-y-6 text-sm">
-            {/* Page Type & Styles */}
-            <section>
-              <h3 className="text-sm font-medium text-muted-foreground">Type & Style</h3>
-              <div className="mt-2 grid gap-2">
-                <div className="flex items-center gap-3">
-                  <label className="flex items-center gap-1 text-sm">
-                    <input type="radio" name="pagetype" checked={(currentPage?.pageType || 'worksheet') === 'worksheet'} onChange={() => setPagePatch(currentPageId!, { pageType: 'worksheet' })} />
-                    Worksheet
-                  </label>
-                  <label className="flex items-center gap-1 text-sm">
-                    <input type="radio" name="pagetype" checked={(currentPage?.pageType || 'worksheet') === 'coloring'} onChange={() => setPagePatch(currentPageId!, { pageType: 'coloring' })} />
-                    Coloring Book
-                  </label>
-                </div>
-                {(currentPage?.pageType || 'worksheet') === 'coloring' ? (
-                  <div className="grid gap-1">
-                    <label htmlFor="coloring-style">Style</label>
-                    <select id="coloring-style" className="border rounded px-2 py-1" value={currentPage?.coloringStyle || 'classic'} onChange={(e) => setPagePatch(currentPageId!, { coloringStyle: e.target.value as any })}>
-                      <option value="classic">Classic</option>
-                      <option value="anime">Anime</option>
-                      <option value="retro">Retro</option>
-                      <option value="storybook">Storybook</option>
-                    </select>
-                  </div>
-                ) : null}
-              </div>
-            </section>
-
-            <section>
-              <h3 className="text-sm font-medium text-muted-foreground">Page</h3>
-              <div className="mt-2 grid gap-2">
-                <label htmlFor="page-title">Title</label>
-                <input id="page-title" className="border rounded px-2 py-1" value={currentPage?.title || ""} onChange={(e) => setPagePatch(currentPageId!, { title: e.target.value })} />
-                <label htmlFor="page-orientation">Orientation</label>
-                <select id="page-orientation" className="border rounded px-2 py-1" value={currentPage?.orientation || "portrait"} onChange={(e) => setPagePatch(currentPageId!, { orientation: e.target.value as Orientation })}>
-                  <option value="portrait">Portrait</option>
-                  <option value="landscape">Landscape</option>
-                </select>
-                <label htmlFor="page-margin">Margin (inches)</label>
-                <input id="page-margin" type="number" min={0.25} max={1.5} step={0.25} className="border rounded px-2 py-1" value={currentPage?.marginInches ?? 0.5} onChange={(e) => setPagePatch(currentPageId!, { marginInches: parseFloat(e.target.value || "0.5") })} />
-              </div>
-            </section>
-
-            {/* Standards (K only) for worksheets */}
-            {(currentPage?.pageType || 'worksheet') === 'worksheet' ? (
+            <div className="space-y-6 text-sm">
+              {/* Page Type & Styles */}
               <section>
-                <h3 className="text-sm font-medium text-muted-foreground">Standards (K)</h3>
+                <h3 className="text-sm font-medium text-muted-foreground">Type & Style</h3>
                 <div className="mt-2 grid gap-2">
-                  <input
-                    type="text"
-                    placeholder="Search (e.g., K.OA or count)"
-                    className="border rounded px-2 py-1 text-sm"
-                    onChange={(e) => {
-                      const q = e.currentTarget.value.toLowerCase();
-                      const all = standardsCatalog;
-                      const filtered = q
-                        ? all.filter(s => s.code.toLowerCase().includes(q) || (s.description || '').toLowerCase().includes(q))
-                        : all;
-                      // Store filtered list temporarily via dataset on the select (no extra state)
-                      const sel = document.getElementById('k-standards-select') as HTMLSelectElement | null;
-                      if (sel) {
-                        sel.dataset.filter = q;
-                        // Force rerender by toggling a dummy value
-                        sel.dispatchEvent(new Event('rebuild'));
-                      }
-                    }}
-                  />
-                  <StandardsMultiSelect
-                    id="k-standards-select"
-                    options={standardsCatalog}
-                    value={currentPage?.standards || []}
-                    onChange={(vals) => setPagePatch(currentPageId!, { standards: vals, systemPromptEdited: false })}
-                  />
-                  <div className="text-xs text-muted-foreground">Selected: {(currentPage?.standards || []).join(', ') || 'None'}</div>
+                  <div className="flex items-center gap-3">
+                    <label className="flex items-center gap-1 text-sm">
+                      <input type="radio" name="pagetype" checked={(currentPage?.pageType || 'worksheet') === 'worksheet'} onChange={() => setPagePatch(currentPageId!, { pageType: 'worksheet' })} />
+                      Worksheet
+                    </label>
+                    <label className="flex items-center gap-1 text-sm">
+                      <input type="radio" name="pagetype" checked={(currentPage?.pageType || 'worksheet') === 'coloring'} onChange={() => setPagePatch(currentPageId!, { pageType: 'coloring' })} />
+                      Coloring Book
+                    </label>
+                  </div>
+                  {(currentPage?.pageType || 'worksheet') === 'coloring' ? (
+                    <div className="grid gap-1">
+                      <label htmlFor="coloring-style">Style</label>
+                      <select id="coloring-style" className="border rounded px-2 py-1" value={currentPage?.coloringStyle || 'classic'} onChange={(e) => setPagePatch(currentPageId!, { coloringStyle: e.target.value as any })}>
+                        <option value="classic">Classic</option>
+                        <option value="anime">Anime</option>
+                        <option value="retro">Retro</option>
+                        <option value="storybook">Storybook</option>
+                      </select>
+                    </div>
+                  ) : null}
                 </div>
               </section>
-            ) : null}
 
-            {/* Prompts */}
-            <section>
-              <h3 className="text-sm font-medium text-muted-foreground">Prompts</h3>
-              <div className="mt-2 grid gap-3 text-sm">
-                <div className="grid gap-1">
-                  <label htmlFor="sys-prompt">System Prompt</label>
-                  <textarea id="sys-prompt" className="border rounded px-2 py-1 h-24" placeholder="Base instructions" value={currentPage?.systemPrompt || ''} onChange={(e) => setPagePatch(currentPageId!, { systemPrompt: e.target.value, systemPromptEdited: true })} />
-                  <div>
-                    <button className="px-2 py-1 border rounded" onClick={() => { setPagePatch(currentPageId!, { systemPrompt: computeSystemPrompt(currentPage!), systemPromptEdited: false }); }}>Refresh from selections</button>
+              <section>
+                <h3 className="text-sm font-medium text-muted-foreground">Page</h3>
+                <div className="mt-2 grid gap-2">
+                  <label htmlFor="page-title">Title</label>
+                  <input id="page-title" className="border rounded px-2 py-1" value={currentPage?.title || ""} onChange={(e) => setPagePatch(currentPageId!, { title: e.target.value })} />
+                  <label htmlFor="page-orientation">Orientation</label>
+                  <select id="page-orientation" className="border rounded px-2 py-1" value={currentPage?.orientation || "portrait"} onChange={(e) => setPagePatch(currentPageId!, { orientation: e.target.value as Orientation })}>
+                    <option value="portrait">Portrait</option>
+                    <option value="landscape">Landscape</option>
+                  </select>
+                  <label htmlFor="page-margin">Margin (inches)</label>
+                  <input id="page-margin" type="number" min={0.25} max={1.5} step={0.25} className="border rounded px-2 py-1" value={currentPage?.marginInches ?? 0.5} onChange={(e) => setPagePatch(currentPageId!, { marginInches: parseFloat(e.target.value || "0.5") })} />
+                </div>
+              </section>
+
+              {/* Standards (K only) for worksheets */}
+              {(currentPage?.pageType || 'worksheet') === 'worksheet' ? (
+                <section>
+                  <h3 className="text-sm font-medium text-muted-foreground">Standards (K)</h3>
+                  <div className="mt-2 grid gap-2">
+                    <input
+                      type="text"
+                      placeholder="Search (e.g., K.OA or count)"
+                      className="border rounded px-2 py-1 text-sm"
+                      onChange={(e) => {
+                        const q = e.currentTarget.value.toLowerCase();
+                        const all = standardsCatalog;
+                        const filtered = q
+                          ? all.filter(s => s.code.toLowerCase().includes(q) || (s.description || '').toLowerCase().includes(q))
+                          : all;
+                        // Store filtered list temporarily via dataset on the select (no extra state)
+                        const sel = document.getElementById('k-standards-select') as HTMLSelectElement | null;
+                        if (sel) {
+                          sel.dataset.filter = q;
+                          // Force rerender by toggling a dummy value
+                          sel.dispatchEvent(new Event('rebuild'));
+                        }
+                      }}
+                    />
+                    <StandardsMultiSelect
+                      id="k-standards-select"
+                      options={standardsCatalog}
+                      value={currentPage?.standards || []}
+                      onChange={(vals) => setPagePatch(currentPageId!, { standards: vals, systemPromptEdited: false })}
+                    />
+                    <div className="text-xs text-muted-foreground">Selected: {(currentPage?.standards || []).join(', ') || 'None'}</div>
                   </div>
-                </div>
-                <div className="grid gap-1">
-                  <label htmlFor="gen-prompt">Prompt</label>
-                  <textarea id="gen-prompt" className="border rounded px-2 py-1 h-24" placeholder="Extra instructions" value={currentPage?.prompt || ""} onChange={(e) => setPagePatch(currentPageId!, { prompt: e.target.value })} />
-                </div>
-                <button className="px-2 py-1 border rounded disabled:opacity-50 w-max" disabled={generating} onClick={async () => {
-                  const prompt = (currentPage?.prompt || "").trim();
-                  try {
-                    setGenerating(true);
-                    const { generateColoringBookImage } = await import("@/lib/nanoBanana");
-                    const url = await generateColoringBookImage(buildInstructionPrompt(currentPage!, prompt));
-                    setPagePatch(currentPageId!, { imageUrl: url, originalImageUrl: url });
-                  } catch (err) {
-                    pushToast((err as Error).message || 'Failed to generate image', 'error');
-                  } finally {
-                    setGenerating(false);
-                  }
-                }}>{generating ? "Generating…" : "Generate"}</button>
-                {/* Inpainting moved to its own modal/section */}
-              </div>
-            </section>
+                </section>
+              ) : null}
 
-            {/* Inpainting */}
-            <section>
-              <h3 className="text-sm font-medium text-muted-foreground">Inpainting</h3>
-              <div className="mt-2 grid gap-2">
-                <button className="px-2 py-1 border rounded disabled:opacity-50 w-max" disabled={!currentPage?.imageUrl} onClick={() => setShowInpaint(true)}>Inpaint…</button>
-                <p className="text-xs text-muted-foreground">Paint a pink mask to transform selected areas. Press I to open quickly.</p>
-              </div>
-            </section>
+              {/* Prompts */}
+              <section>
+                <h3 className="text-sm font-medium text-muted-foreground">Prompts</h3>
+                <div className="mt-2 grid gap-3 text-sm">
+                  <div className="grid gap-1">
+                    <label htmlFor="sys-prompt">System Prompt</label>
+                    <textarea id="sys-prompt" className="border rounded px-2 py-1 h-24" placeholder="Base instructions" value={currentPage?.systemPrompt || ''} onChange={(e) => setPagePatch(currentPageId!, { systemPrompt: e.target.value, systemPromptEdited: true })} />
+                    <div>
+                      <button className="px-2 py-1 border rounded" onClick={() => { setPagePatch(currentPageId!, { systemPrompt: computeSystemPrompt(currentPage!), systemPromptEdited: false }); }}>Refresh from selections</button>
+                    </div>
+                  </div>
+                  <div className="grid gap-1">
+                    <label htmlFor="gen-prompt">Prompt</label>
+                    <textarea id="gen-prompt" className="border rounded px-2 py-1 h-24" placeholder="Extra instructions" value={currentPage?.prompt || ""} onChange={(e) => setPagePatch(currentPageId!, { prompt: e.target.value })} />
+                  </div>
+                  <button className="px-2 py-1 border rounded disabled:opacity-50 w-max" disabled={generating} onClick={async () => {
+                    const promptText = (currentPage?.prompt || "").trim();
+                    await generateInto(currentPageId!, promptText);
+                  }}>{generating ? "Generating…" : "Generate"}</button>
+                  {/* Inpainting moved to its own modal/section */}
+                </div>
+              </section>
 
-            {/* Import */}
-            <section>
-              <h3 className="text-sm font-medium text-muted-foreground">Import</h3>
-              <div className="mt-2 grid gap-2">
-                <input type="file" accept="image/*" onChange={(e) => {
-                  const f = e.currentTarget.files?.[0];
-                  if (!f) return;
-                  if (f.size > 8 * 1024 * 1024) { pushToast('File too large (max 8 MB)', 'error'); return; }
-                  const url = URL.createObjectURL(f);
-                  const prev = pages.find(p => p.id === currentPageId!);
-                  try {
-                    if (prev?.originalImageUrl && prev.originalImageUrl.startsWith('blob:') && prev.originalImageUrl !== url) URL.revokeObjectURL(prev.originalImageUrl);
-                    if (prev?.imageUrl && prev.imageUrl.startsWith('blob:') && prev.imageUrl !== url) URL.revokeObjectURL(prev.imageUrl);
-                  } catch {}
-                  setPagePatch(currentPageId!, { originalImageUrl: url, imageUrl: url });
-                  void applyThreshold(currentPageId!, pages.find(p => p.id === currentPageId!)?.bwThreshold ?? 200);
-                }} />
-              </div>
-            </section>
-          </div>
+              {/* Import */}
+              <section>
+                <h3 className="text-sm font-medium text-muted-foreground">Import</h3>
+                <div className="mt-2 grid gap-2">
+                  <input type="file" accept="image/*" onChange={(e) => {
+                    const f = e.currentTarget.files?.[0];
+                    if (!f) return;
+                    if (f.size > 8 * 1024 * 1024) { pushToast('File too large (max 8 MB)', 'error'); return; }
+                    const url = URL.createObjectURL(f);
+                    const prev = pages.find(p => p.id === currentPageId!);
+                    try {
+                      if (prev?.originalImageUrl && prev.originalImageUrl.startsWith('blob:') && prev.originalImageUrl !== url) URL.revokeObjectURL(prev.originalImageUrl);
+                      if (prev?.imageUrl && prev.imageUrl.startsWith('blob:') && prev.imageUrl !== url) URL.revokeObjectURL(prev.imageUrl);
+                    } catch { }
+                    setPagePatch(currentPageId!, { originalImageUrl: url, imageUrl: url });
+                    void applyThreshold(currentPageId!, pages.find(p => p.id === currentPageId!)?.bwThreshold ?? 200);
+                  }} />
+                </div>
+              </section>
+            </div>
           )}
         </aside>
       </div>
@@ -959,14 +989,7 @@ export default function EditorPage() {
         ))}
       </div>
 
-      {/* Inpainting modal */}
-      {showInpaint && currentPage?.imageUrl ? (
-        <InpaintModal
-          imageUrl={currentPage.imageUrl}
-          onCancel={() => setShowInpaint(false)}
-          onApply={(maskCanvas, invert) => void applyInpainting(maskCanvas, invert)}
-        />
-      ) : null}
+      {/* Inpainting disabled */}
 
       {/* Settings modal */}
       {branchingParentId && (
@@ -1001,89 +1024,7 @@ export default function EditorPage() {
   );
 }
 
-// Inpainting modal component: paints a pink translucent mask over the base image
-function InpaintModal({
-  imageUrl,
-  onCancel,
-  onApply,
-}: {
-  imageUrl?: string;
-  onCancel: () => void;
-  onApply: (maskCanvas: HTMLCanvasElement, invert: boolean) => void;
-}) {
-  const canvasRef = useReactRef<HTMLCanvasElement | null>(null);
-  const maskRef = useReactRef<HTMLCanvasElement | null>(null);
-  const isDownRef = useReactRef(false);
-  const scaleRef = useReactRef(1);
-  const imgRef = useReactRef<HTMLImageElement | null>(null);
-  const [brushSize, setBrushSize] = useState(24);
-  const [eraser, setEraser] = useState(false);
-  const [invert, setInvert] = useState(false);
-
-  // Setup canvas and draw base image
-  useEffect(() => {
-    const setup = async () => {
-      if (!imageUrl) return;
-      const img = new Image(); img.crossOrigin = 'anonymous';
-      await new Promise<void>((res, rej) => { img.onload = () => res(); img.onerror = () => rej(new Error('load failed')); img.src = imageUrl; });
-      imgRef.current = img;
-      const maxW = 820, maxH = 1060; // viewport for modal
-      const scale = Math.min(1, Math.min(maxW / img.width, maxH / img.height));
-      scaleRef.current = scale;
-      const w = Math.max(1, Math.round(img.width * scale));
-      const h = Math.max(1, Math.round(img.height * scale));
-      const c = canvasRef.current; const m = maskRef.current; if (!c || !m) return;
-      c.width = w; c.height = h; m.width = w; m.height = h;
-      const ctx = c.getContext('2d'); if (!ctx) return;
-      ctx.clearRect(0,0,w,h); ctx.drawImage(img, 0, 0, w, h);
-      const mctx = m.getContext('2d'); if (!mctx) return; mctx.clearRect(0,0,w,h);
-    };
-    void setup();
-  }, [imageUrl]);
-
-  function drawAt(clientX: number, clientY: number) {
-    const m = maskRef.current; const c = canvasRef.current; if (!m || !c) return;
-    const rect = m.getBoundingClientRect();
-    const x = clientX - rect.left; const y = clientY - rect.top;
-    const ctx = m.getContext('2d'); if (!ctx) return;
-    ctx.globalCompositeOperation = eraser ? 'destination-out' : 'source-over';
-    ctx.fillStyle = 'rgba(255, 20, 147, 0.45)';
-    ctx.beginPath(); ctx.arc(x, y, Math.max(1, brushSize/2), 0, Math.PI*2); ctx.fill();
-  }
-
-  return (
-    <div role="dialog" aria-modal className="fixed inset-0 bg-black/40 z-50 grid place-items-center">
-      <div className="bg-white text-black rounded-md shadow-lg p-3 w-[960px] max-w-[95vw]">
-        <div className="flex items-center justify-between mb-2">
-          <h2 className="font-semibold">Inpainting</h2>
-          <div className="flex items-center gap-2 text-xs">
-            <label className="flex items-center gap-1"><input type="checkbox" checked={eraser} onChange={(e)=>setEraser(e.currentTarget.checked)} />Eraser</label>
-            <label className="flex items-center gap-1"><input type="checkbox" checked={invert} onChange={(e)=>setInvert(e.currentTarget.checked)} />Invert mask</label>
-            <label className="flex items-center gap-1">Brush {brushSize}
-              <input type="range" min={4} max={96} step={2} value={brushSize} onChange={(e)=>setBrushSize(parseInt(e.currentTarget.value,10))} />
-            </label>
-            <button className="px-2 py-1 border rounded" onClick={()=>{ const m = maskRef.current; if (!m) return; const mctx = m.getContext('2d'); if (!mctx) return; mctx.clearRect(0,0,m.width,m.height); }}>Clear</button>
-          </div>
-        </div>
-        <div className="relative border bg-slate-50" style={{width:'fit-content'}}>
-          <canvas ref={canvasRef} className="block" />
-          <canvas
-            ref={maskRef}
-            className="absolute inset-0 block"
-            onMouseDown={(e)=>{isDownRef.current=true; drawAt(e.clientX, e.clientY);}}
-            onMouseMove={(e)=>{ if (isDownRef.current) drawAt(e.clientX, e.clientY); }}
-            onMouseUp={()=>{isDownRef.current=false;}}
-            onMouseLeave={()=>{isDownRef.current=false;}}
-          />
-        </div>
-        <div className="flex justify-end gap-2 mt-3">
-          <button className="px-2 py-1 border rounded" onClick={onCancel}>Cancel</button>
-          <button className="px-2 py-1 border rounded" onClick={()=>{ const m = maskRef.current; if (m) onApply(m, invert); }}>Save</button>
-        </div>
-      </div>
-    </div>
-  );
-}
+// Inpainting modal component disabled for now
 
 // Compact multi-select for K standards with simple search support
 function StandardsMultiSelect({
