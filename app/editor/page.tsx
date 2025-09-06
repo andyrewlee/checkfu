@@ -754,7 +754,7 @@ export default function EditorPage() {
         <div className="flex items-center gap-2">
           <button
             className="inline-flex items-center gap-2 px-3 py-1.5 rounded-md border text-sm disabled:opacity-50"
-            aria-label="Export"
+            aria-label="Export to PDF"
             disabled={!pages.length}
             onClick={() => {
               const selected = nodes.filter(n => n.selected).map(n => pages.find(p => p.id === n.id)!).filter(Boolean) as Page[];
@@ -763,7 +763,7 @@ export default function EditorPage() {
               void exportPagesToPdf(toExport);
             }}
           >
-            <span>Export</span>
+            <span>Export to PDF</span>
             {nodes.filter(n => n.selected).length > 1 ? (
               <span className="px-1.5 h-5 min-w-[1.25rem] inline-flex items-center justify-center rounded bg-blue-100 text-blue-800 text-xs" aria-label="Selected count">
                 {nodes.filter(n => n.selected).length}
