@@ -14,8 +14,8 @@
   "dependencies": {
     "@clerk/clerk-react": "^5.25.0",
     "@clerk/nextjs": "^6.12.6",
+    "@google/genai": "^1.17.0",
     "convex": "^1.26.0",
-    "fabric": "^5.5.2",
     "jspdf": "^2.5.2",
     "next": "15.2.3",
     "react": "^19.0.0",

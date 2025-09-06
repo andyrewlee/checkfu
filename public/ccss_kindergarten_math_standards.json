@@ -1,0 +1,233 @@
+{
+  "standard_set": "Common Core State Standards for Mathematics",
+  "grade": "Kindergarten",
+  "version": "2023 09 PDF",
+  "source_note": "Paraphrased for brevity. Refer to the official PDF on corestandards dot org for exact wording.",
+  "domains": [
+    {
+      "code": "K.CC",
+      "title": "Counting and Cardinality",
+      "clusters": [
+        {
+          "code": "K.CC.A",
+          "title": "Know number names and the count sequence",
+          "standards": [
+            {
+              "code": "K.CC.A.1",
+              "description": "Count to one hundred by ones and by tens"
+            },
+            {
+              "code": "K.CC.A.2",
+              "description": "Start from any known number and count forward without starting at one"
+            },
+            {
+              "code": "K.CC.A.3",
+              "description": "Write numerals from zero to twenty and use them to show how many objects with zero for none"
+            }
+          ]
+        },
+        {
+          "code": "K.CC.B",
+          "title": "Count to tell the number of objects",
+          "standards": [
+            {
+              "code": "K.CC.B.4",
+              "description": "Relate numbers to quantities and connect counting to cardinality",
+              "components": [
+                {
+                  "code": "K.CC.B.4.a",
+                  "description": "When counting pair each object with exactly one number name in order"
+                },
+                {
+                  "code": "K.CC.B.4.b",
+                  "description": "The final number said tells how many and it does not change with order or arrangement"
+                },
+                {
+                  "code": "K.CC.B.4.c",
+                  "description": "Each next number name means one more"
+                }
+              ]
+            },
+            {
+              "code": "K.CC.B.5",
+              "description": "Count to answer how many for up to twenty in a line array or circle and up to ten when scattered and count out a given number from one to twenty"
+            }
+          ]
+        },
+        {
+          "code": "K.CC.C",
+          "title": "Compare numbers",
+          "standards": [
+            {
+              "code": "K.CC.C.6",
+              "description": "Decide whether one group has more fewer or the same number of objects as another using matching or counting strategies"
+            },
+            {
+              "code": "K.CC.C.7",
+              "description": "Compare two written numerals from one through ten"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "code": "K.OA",
+      "title": "Operations and Algebraic Thinking",
+      "clusters": [
+        {
+          "code": "K.OA.A",
+          "title": "Understand addition as putting together and adding to and subtraction as taking apart and taking from",
+          "standards": [
+            {
+              "code": "K.OA.A.1",
+              "description": "Use objects drawings actions sounds verbal explanations expressions or equations to represent addition and subtraction"
+            },
+            {
+              "code": "K.OA.A.2",
+              "description": "Solve addition and subtraction word problems and add and subtract within ten using objects or drawings to represent the situation"
+            },
+            {
+              "code": "K.OA.A.3",
+              "description": "Break numbers up to ten into pairs in more than one way and record each as a drawing or an equation"
+            },
+            {
+              "code": "K.OA.A.4",
+              "description": "For any number from one to nine find the number that makes ten and show it with objects drawings or an equation"
+            },
+            {
+              "code": "K.OA.A.5",
+              "description": "Fluently add and subtract within five"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "code": "K.NBT",
+      "title": "Number and Operations in Base Ten",
+      "clusters": [
+        {
+          "code": "K.NBT.A",
+          "title": "Work with numbers eleven to nineteen to build foundations for place value",
+          "standards": [
+            {
+              "code": "K.NBT.A.1",
+              "description": "Compose and decompose numbers eleven to nineteen as ten ones and some further ones using objects or drawings and record with drawings or equations"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "code": "K.MD",
+      "title": "Measurement and Data",
+      "clusters": [
+        {
+          "code": "K.MD.A",
+          "title": "Describe and compare measurable attributes",
+          "standards": [
+            {
+              "code": "K.MD.A.1",
+              "description": "Describe measurable attributes such as length or weight including several attributes of one object"
+            },
+            {
+              "code": "K.MD.A.2",
+              "description": "Directly compare two objects with a common attribute to decide which has more or less and describe the difference for example taller or shorter"
+            }
+          ]
+        },
+        {
+          "code": "K.MD.B",
+          "title": "Classify objects and count the number of objects in each category",
+          "standards": [
+            {
+              "code": "K.MD.B.3",
+              "description": "Classify objects into given categories count how many in each category and order the categories by count"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "code": "K.G",
+      "title": "Geometry",
+      "clusters": [
+        {
+          "code": "K.G.A",
+          "title": "Identify and describe shapes including squares circles triangles rectangles hexagons cubes cones cylinders and spheres",
+          "standards": [
+            {
+              "code": "K.G.A.1",
+              "description": "Describe objects using shape names and use position words such as above below beside in front of behind and next to"
+            },
+            {
+              "code": "K.G.A.2",
+              "description": "Name shapes correctly regardless of orientation or size"
+            },
+            {
+              "code": "K.G.A.3",
+              "description": "Tell whether a shape is two dimensional flat or three dimensional solid"
+            }
+          ]
+        },
+        {
+          "code": "K.G.B",
+          "title": "Analyze compare create and compose shapes",
+          "standards": [
+            {
+              "code": "K.G.B.4",
+              "description": "Analyze and compare two and three dimensional shapes by size orientation and attributes such as sides and corners using informal language"
+            },
+            {
+              "code": "K.G.B.5",
+              "description": "Model shapes by building them from components and by drawing them"
+            },
+            {
+              "code": "K.G.B.6",
+              "description": "Compose simple shapes to make larger shapes for example join two triangles to make a rectangle"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "mathematical_practices": [
+    {
+      "code": "MP1",
+      "description": "Make sense of problems and persist in solving them"
+    },
+    {
+      "code": "MP2",
+      "description": "Reason with quantities and symbols"
+    },
+    {
+      "code": "MP3",
+      "description": "Build arguments and examine others reasoning"
+    },
+    {
+      "code": "MP4",
+      "description": "Model with mathematics"
+    },
+    {
+      "code": "MP5",
+      "description": "Choose and use tools strategically"
+    },
+    {
+      "code": "MP6",
+      "description": "Use precise language and computation"
+    },
+    {
+      "code": "MP7",
+      "description": "Notice and make use of structure"
+    },
+    {
+      "code": "MP8",
+      "description": "Notice and express regularity in repeated reasoning"
+    }
+  ],
+  "notes": [
+    "In Kindergarten addition and subtraction problem groups use up to ten objects",
+    "Drawings should show the mathematics rather than detailed pictures whenever drawings are mentioned",
+    "For K MD 3 limit category counts to ten or fewer"
+  ]
+}

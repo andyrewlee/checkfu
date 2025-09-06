@@ -12,28 +12,35 @@ import { SignUpButton } from "@clerk/nextjs";
 import { SignInButton } from "@clerk/nextjs";
 import { UserButton } from "@clerk/nextjs";
 
+// Toggle Clerk UI on/off (set to true to re-enable the demo header/auth widgets)
+const ENABLE_CLERK = false;
+
 export default function Home() {
   return (
     <>
       <header className="sticky top-0 z-10 bg-background p-4 border-b-2 border-slate-200 dark:border-slate-800 flex flex-row justify-between items-center">
         <div className="flex items-center gap-4">
-          <span>Convex + Next.js + Clerk</span>
+          <span>Convex + Next.js</span>
           <Link href="/editor" className="underline hover:no-underline text-sm">
             Open Checkfu Editor
           </Link>
         </div>
-        <UserButton />
+        {ENABLE_CLERK ? <UserButton /> : null}
       </header>
       <main className="p-8 flex flex-col gap-8">
-        <h1 className="text-4xl font-bold text-center">
-          Convex + Next.js + Clerk
-        </h1>
-        <Authenticated>
+        <h1 className="text-4xl font-bold text-center">Convex + Next.js</h1>
+        {ENABLE_CLERK ? (
+          <Authenticated>
+            <Content />
+          </Authenticated>
+        ) : (
           <Content />
-        </Authenticated>
-        <Unauthenticated>
-          <SignInForm />
-        </Unauthenticated>
+        )}
+        {ENABLE_CLERK ? (
+          <Unauthenticated>
+            <SignInForm />
+          </Unauthenticated>
+        ) : null}
       </main>
     </>
   );

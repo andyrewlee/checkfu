@@ -24,3 +24,10 @@ body {
   background: var(--background);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* Print CSS for letter paper */
+@media print {
+  @page { size: 8.5in 11in; margin: 1in; }
+  html, body { width: 8.5in; height: 11in; }
+  .no-print { display: none !important; }
+}
