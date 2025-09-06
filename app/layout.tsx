@@ -37,13 +37,14 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
-        {ENABLE_CLERK ? (
+        {children}
+        {/* {ENABLE_CLERK ? (
           <ClerkProvider dynamic>
             <ConvexClientProvider>{children}</ConvexClientProvider>
           </ClerkProvider>
         ) : (
           <ConvexClientProvider>{children}</ConvexClientProvider>
-        )}
+        )} */}
       </body>
     </html>
   );

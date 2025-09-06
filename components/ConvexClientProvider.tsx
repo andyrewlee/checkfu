@@ -9,7 +9,7 @@ import { useAuth } from "@clerk/nextjs";
 // so the app works without wrapping in <ClerkProvider /> or showing banners.
 const ENABLE_CLERK = false;
 
-const convex = new ConvexReactClient(process.env.NEXT_PUBLIC_CONVEX_URL!);
+const convex = new ConvexReactClient(process.env.NEXT_PUBLIC_CONVEX_URL || "");
 
 export default function ConvexClientProvider({ children }: { children: ReactNode }) {
   if (ENABLE_CLERK) {
