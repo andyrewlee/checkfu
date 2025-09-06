@@ -73,6 +73,7 @@ export default function EditorPage() {
       id: p.id,
       type: "page",
       position,
+      dragHandle: ".rf-node-drag",
       data: {
         id: p.id,
         title: p.title,

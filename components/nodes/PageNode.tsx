@@ -20,6 +20,7 @@ export type PageNodeData = {
 };
 
 function PageNode({ data, selected }: NodeProps<PageNodeData>) {
+  const stop = (e: any) => e.stopPropagation();
   const scale = 0.25; // thumbnail scale for graph view
   const dims = useMemo(() => {
     const wIn = data.orientation === "portrait" ? 8.5 : 11;
@@ -62,21 +63,10 @@ function PageNode({ data, selected }: NodeProps<PageNodeData>) {
         style={{ background: "#64748b", left: "50%", transform: "translate(-50%, 0)" }}
       />
 
-      <div className="flex items-center justify-between mb-2">
+      <div className="flex items-center justify-between mb-2 rf-node-drag">
         <div className="text-xs font-medium truncate" title={data.title}>
           {data.title}
         </div>
-        <button
-          className="text-xs px-1.5 py-0.5 border rounded hover:bg-accent"
-          onClick={(e) => {
-            e.stopPropagation();
-            data.onBranch(data.id);
-          }}
-          aria-label="Create variant"
-          title="Create variant"
-        >
-          Branch
-        </button>
       </div>
       <div
         ref={containerRef}
@@ -86,31 +76,30 @@ function PageNode({ data, selected }: NodeProps<PageNodeData>) {
         onDrop={handleDrop}
         title="Drop a Text item here"
       >
-        {selected ? (
-          <FabricPage
-            orientation={data.orientation}
-            marginInches={data.marginInches}
-            texts={data.texts}
-            onTextsChange={(next) => data.onTextsChange?.(data.id, next)}
-            scale={scale}
-            onDropText={(x, y) => data.onDropText(data.id, x, y)}
-          />
-        ) : (
-          <div style={{ transform: `scale(${scale})`, transformOrigin: "top left", position: "relative" }}>
-            <WorksheetCanvas
-              orientation={data.orientation}
-              marginInches={data.marginInches}
-            />
-            {/* Text overlays for preview (scale-compensated font size) */}
-            <div className="absolute left-0 top-0 pointer-events-none z-10">
-              {data.texts?.map((t) => (
-                <div key={t.id} className="absolute" style={{ left: t.x, top: t.y }}>
-                  <span style={{ fontSize: Math.max(12, Math.round(16 / scale)) }}>{t.content}</span>
-                </div>
-              ))}
+        <FabricPage
+          orientation={data.orientation}
+          marginInches={data.marginInches}
+          texts={data.texts}
+          onTextsChange={(next) => data.onTextsChange?.(data.id, next)}
+          scale={scale}
+          onDropText={(x, y) => data.onDropText(data.id, x, y)}
+        />
+        {/* Always-visible overlay of text from state for immediate feedback */}
+        <div
+          className="absolute left-0 top-0 pointer-events-none z-10"
+          style={{
+            width: dims.w,
+            height: dims.h,
+            transform: `scale(${scale})`,
+            transformOrigin: "top left",
+          }}
+        >
+          {data.texts?.map((t) => (
+            <div key={t.id} className="absolute" style={{ left: t.x, top: t.y }}>
+              <span style={{ fontSize: 16, color: "#111" }}>{t.content}</span>
             </div>
-          </div>
-        )}
+          ))}
+        </div>
       </div>
     </div>
   );

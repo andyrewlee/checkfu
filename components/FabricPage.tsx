@@ -43,7 +43,6 @@ export default function FabricPage({
     // Base dimensions and zoom
     canvas.setWidth(width);
     canvas.setHeight(height);
-    canvas.setZoom(scale);
     // Set CSS size to match zoom for crisp pointer mapping
     el.style.width = `${width * scale}px`;
     el.style.height = `${height * scale}px`;
@@ -98,7 +97,6 @@ export default function FabricPage({
     const canvas = fabricRef.current;
     const el = canvasRef.current;
     if (!canvas || !el) return;
-    canvas.setZoom(scale);
     el.style.width = `${width * scale}px`;
     el.style.height = `${height * scale}px`;
     // Keep text readable at thumbnail scale by inverting the zoom for font size
@@ -179,11 +177,123 @@ export default function FabricPage({
     const rect = (canvasRef.current as HTMLCanvasElement).getBoundingClientRect();
     const x = (e.clientX - rect.left) / scale;
     const y = (e.clientY - rect.top) / scale;
-    onDropText?.(Math.round(x), Math.round(y));
+    // Insert directly into Fabric for immediate feedback
+    const canvas = fabricRef.current;
+    if (canvas) {
+      const id = (crypto && (crypto as any).randomUUID) ? (crypto as any).randomUUID() : String(Date.now());
+      const baseFont = Math.max(12, Math.round(16 / scale));
+      const tb = new fabric.Textbox("Text", {
+        left: Math.round(x),
+        top: Math.round(y),
+        fontSize: baseFont,
+        fill: "#111",
+        width: 300,
+        editable: true,
+      }) as fabric.Textbox & { elId?: string };
+      (tb as any).elId = id;
+      textMapRef.current.set(id, tb);
+      canvas.add(tb);
+      canvas.setActiveObject(tb);
+      canvas.requestRenderAll();
+      // Sync up to parent state
+      const items: FabricText[] = [];
+      canvas.getObjects().forEach((obj) => {
+        if (obj.type === "textbox") {
+          const tbox = obj as fabric.Textbox & { elId?: string };
+          const tid = tbox.elId || (tbox as any).elId || "";
+          items.push({ id: tid, x: Math.round(tbox.left || 0), y: Math.round(tbox.top || 0), content: tbox.text || "" });
+        }
+      });
+      onTextsChange(items);
+    } else {
+      onDropText?.(Math.round(x), Math.round(y));
+    }
+  };
+
+  // Attach native listeners directly to the <canvas> to ensure drop works
+  useEffect(() => {
+    const el = canvasRef.current;
+    if (!el) return;
+    const onOver = (e: DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      try {
+        (e.dataTransfer as DataTransfer).dropEffect = "copy";
+      } catch {}
+    };
+    const onDropNative = (e: DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const dt = e.dataTransfer as DataTransfer;
+      const kind = dt.getData("application/checkfu") || dt.getData("text/plain");
+      if (kind !== "text") return;
+      const rect = el.getBoundingClientRect();
+      const x = (e.clientX - rect.left) / scale;
+      const y = (e.clientY - rect.top) / scale;
+      const canvas = fabricRef.current;
+      if (canvas) {
+        const id = (crypto && (crypto as any).randomUUID) ? (crypto as any).randomUUID() : String(Date.now());
+        const baseFont = Math.max(12, Math.round(16 / scale));
+        const tb = new fabric.Textbox("Text", {
+          left: Math.round(x),
+          top: Math.round(y),
+          fontSize: baseFont,
+          fill: "#111",
+          width: 300,
+          editable: true,
+        }) as fabric.Textbox & { elId?: string };
+        (tb as any).elId = id;
+        textMapRef.current.set(id, tb);
+        canvas.add(tb);
+        canvas.setActiveObject(tb);
+        canvas.requestRenderAll();
+        const items: FabricText[] = [];
+        canvas.getObjects().forEach((obj) => {
+          if (obj.type === "textbox") {
+            const tbox = obj as fabric.Textbox & { elId?: string };
+            const tid = tbox.elId || (tbox as any).elId || "";
+            items.push({ id: tid, x: Math.round(tbox.left || 0), y: Math.round(tbox.top || 0), content: tbox.text || "" });
+          }
+        });
+        onTextsChange(items);
+      } else {
+        onDropText?.(Math.round(x), Math.round(y));
+      }
+    };
+    el.addEventListener("dragover", onOver);
+    el.addEventListener("drop", onDropNative);
+    return () => {
+      el.removeEventListener("dragover", onOver);
+      el.removeEventListener("drop", onDropNative);
+    };
+  }, [scale, onDropText]);
+
+  // Prevent React Flow from stealing interactions when editing the page
+  const stop = (e: any) => {
+    e.stopPropagation();
+  };
+  const prevent = (e: any) => {
+    e.preventDefault();
+    e.stopPropagation();
   };
 
   return (
-    <div onPointerDown={(e) => e.stopPropagation()} onDragOver={handleDragOver} onDrop={handleDrop}>
+    <div
+      className="nodrag nopan nowheel"
+      onPointerDown={stop}
+      onPointerMove={stop}
+      onPointerUp={stop}
+      onMouseDown={stop}
+      onMouseMove={stop}
+      onMouseUp={stop}
+      onClick={stop}
+      onDoubleClick={stop}
+      onContextMenu={prevent}
+      onWheel={prevent}
+      onDragOver={handleDragOver}
+      onDrop={handleDrop}
+      style={{ touchAction: "none" }}
+    >
       <canvas ref={canvasRef} />
     </div>
   );
