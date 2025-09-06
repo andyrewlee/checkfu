@@ -895,16 +895,7 @@ export default function EditorPage() {
             <div className="space-y-6 text-sm">
               {/* Page Type & Styles */}
               <section>
-                <h3 className="text-sm font-semibold text-slate-700 flex items-center gap-2">
-                  Type & Style
-                  <span className="text-slate-400" title="Choose worksheet or coloring book. For coloring, pick a style for line weight and shapes.">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                      <circle cx="12" cy="12" r="10"></circle>
-                      <line x1="12" y1="16" x2="12" y2="12"></line>
-                      <line x1="12" y1="8" x2="12" y2="8"></line>
-                    </svg>
-                  </span>
-                </h3>
+                <h3 className="text-sm font-semibold text-slate-700">Type & Style</h3>
                 <div className="mt-2 grid gap-2">
                 <div className="flex items-center gap-3">
                   <label className="flex items-center gap-1 text-sm">
@@ -930,16 +921,7 @@ export default function EditorPage() {
               </section>
 
               <section>
-                <h3 className="text-sm font-semibold text-slate-700 flex items-center gap-2">
-                  Page
-                  <span className="text-slate-400" title="Set title, orientation, and printable margins.">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                      <circle cx="12" cy="12" r="10"></circle>
-                      <line x1="12" y1="16" x2="12" y2="12"></line>
-                      <line x1="12" y1="8" x2="12" y2="8"></line>
-                    </svg>
-                  </span>
-                </h3>
+                <h3 className="text-sm font-semibold text-slate-700">Page</h3>
                 <div className="mt-2 grid gap-2">
                   <label htmlFor="page-title">Title</label>
                   <input id="page-title" className="border rounded px-2 py-1" value={currentPage?.title || ""} onChange={(e) => setPagePatch(currentPageId!, { title: e.target.value })} />
@@ -956,16 +938,7 @@ export default function EditorPage() {
               {/* Standards (K only) for worksheets */}
               {(currentPage?.pageType || 'worksheet') === 'worksheet' ? (
                 <section>
-                  <h3 className="text-sm font-semibold text-slate-700 flex items-center gap-2">
-                    Standards (K)
-                    <span className="text-slate-400" title="Optional: select Common Core Kindergarten standards to guide worksheet prompts.">
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                        <circle cx="12" cy="12" r="10"></circle>
-                        <line x1="12" y1="16" x2="12" y2="12"></line>
-                        <line x1="12" y1="8" x2="12" y2="8"></line>
-                      </svg>
-                    </span>
-                  </h3>
+                  <h3 className="text-sm font-semibold text-slate-700">Standards (K)</h3>
                   <div className="mt-2 grid gap-2">
                     <input
                       type="text"
@@ -993,16 +966,7 @@ export default function EditorPage() {
 
               {/* Prompts */}
             <section>
-              <h3 className="text-sm font-semibold text-slate-700 flex items-center gap-2">
-                Prompts
-                <span className="text-slate-400" title="System Prompt sets rules and structure. Prompt adds specific instructions for this page.">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                    <circle cx="12" cy="12" r="10"></circle>
-                    <line x1="12" y1="16" x2="12" y2="12"></line>
-                    <line x1="12" y1="8" x2="12" y2="8"></line>
-                  </svg>
-                </span>
-              </h3>
+              <h3 className="text-sm font-semibold text-slate-700">Prompts</h3>
                 <div className="mt-2 grid gap-3 text-sm">
                   <div className="grid gap-1">
                     <label htmlFor="sys-prompt">System Prompt</label>
