@@ -20,7 +20,3 @@ Checkfu generates printable black-and-white Kindergarten worksheets and coloring
 - Presets: Choose Worksheet or Coloring Book, then pick a preset. Kindergarten standards (K.*) can be selected to guide prompts.
 - Standards → Prompt: Selecting standards appends a `<common-core>` XML block to the end of the prompt for clear separation from your text.
 - Export: Use `Export Current`, `Export Selected`, or `Export All` to create a letter-size PDF. Print CSS supports direct browser printing.
-
-## Additional Notes
-
-- Will set up with Convex for database and Clerk for auth later. They have been disabled/commented out in the repo.
