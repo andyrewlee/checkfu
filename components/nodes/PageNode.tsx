@@ -1,9 +1,9 @@
 "use client";
 
-// PageNode: React Flow node that displays a single printable page.
-// - Header shows title and action buttons (branch, delete)
-// - Body renders a print-accurate page preview (8.5×11 with margins)
-// - Bottom circular "+" provides a clear branching affordance
+/**
+ * PageNode
+ * React Flow node that renders a single printable page with a preview and branching toolbar.
+ */
 
 import { memo, useMemo, useState } from "react";
 import type { Node as RFNode, NodeProps } from "@xyflow/react";
@@ -23,7 +23,6 @@ export type PageNodeData = {
   onQuickGenerate?: (pageId: string) => void;
   imageUrl?: string;
   onSetImageUrl?: (pageId: string, url: string) => void;
-  // Visual status
   loading?: boolean;
   loadingText?: string;
 };
@@ -62,10 +61,10 @@ function PageNode({ data, selected }: NodeProps<PageRFNode>) {
         <div className="text-xs font-medium truncate" title={data.title}>
           {data.title}
         </div>
-        {/* Action buttons removed per spec; NodeToolbar used for branching */}
+        
       </div>
 
-      {/* Page preview only (no direct interaction on node) */}
+      {/* Page preview (non-interactive) */}
       <div className="relative overflow-hidden bg-slate-50 border" style={{ width: dims.w, height: dims.h }}>
         <PagePreview orientation={data.orientation} marginInches={data.marginInches} imageUrl={data.imageUrl} />
         {data.loading ? (
@@ -80,7 +79,7 @@ function PageNode({ data, selected }: NodeProps<PageRFNode>) {
         ) : null}
       </div>
 
-      {/* NodeToolbar for branching: prompt input + action */}
+      {/* Branching toolbar */}
       <NodeToolbar isVisible={selected} position={Position.Bottom} offset={8} className="nodrag nopan nowheel" style={{ pointerEvents: 'all', zIndex: 1000 }}>
         <div className="flex items-center gap-2 bg-white/95 border rounded shadow-sm px-2 py-1">
           <input

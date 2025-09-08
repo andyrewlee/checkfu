@@ -875,7 +875,7 @@ export default function Editor() {
               nodeTypes={nodeTypes}
               onNodesChange={onNodesChange}
               onNodeClick={(_, n) => setCurrentPageId(n.id)}
-            onConnect={(c: Connection) => setEdges((es) => addEdge(c, es))}
+              onConnect={(c: Connection) => setEdges((es) => addEdge(c, es))}
               noPanClassName="nopan"
               noDragClassName="nodrag"
               noWheelClassName="nowheel"

@@ -1,9 +1,9 @@
 "use client";
 
-// PagePreview: lightweight preview of a printable page.
-// - Renders a fixed 8.5×11 canvas in CSS pixels (96 DPI reference)
-// - Shows dashed safe margins and fits the page image with object-contain
-// - Non-interactive: this is a WYSIWYG preview for printing/export
+/**
+ * PagePreview
+ * Lightweight, non-interactive preview of a printable page (US Letter).
+ */
 
 import { useMemo } from "react";
 import Image from "next/image";
