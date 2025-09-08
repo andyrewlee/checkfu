@@ -11,6 +11,10 @@
 
 import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import {
+  generateColoringBookImage,
+  transformImageWithPrompt,
+} from "@/lib/nanoBanana";
+import {
   ReactFlow,
   Background,
   Controls,
@@ -597,12 +601,6 @@ export default function Editor() {
   const lastQuickGenAtRef = useRef<number>(0);
   const generatingAny = pages.some((p) => p.generating);
   const needsApiKey = useGeminiApiKeyNeeded();
-  // Prefetch generation library once an API key exists to reduce first-generate latency
-  useEffect(() => {
-    if (!needsApiKey) {
-      void import("@/lib/nanoBanana");
-    }
-  }, [needsApiKey]);
   // Stable handler refs to avoid dependency cycles in callbacks/effects
   const branchFromRef = useRef<(id: string) => void>(() => {});
   const branchFromWithPromptRef = useRef<
@@ -846,7 +844,6 @@ export default function Editor() {
         const page = pageOverride ?? pagesIndex.byId[pageId]!;
         setPagePatch(pageId, { generating: true, status: "Generating…" });
         const instruction = buildInstruction(page, prompt);
-        const { generateColoringBookImage } = await import("@/lib/nanoBanana");
         const rawUrl = await generateColoringBookImage(instruction);
         const fitted = await fitImageToPrintableArea(rawUrl, page);
         const prev = pagesIndex.byId[pageId];
@@ -882,7 +879,6 @@ export default function Editor() {
         try {
           const baseB64 = await blobUrlToPngBase64(baseUrl);
           const instruction = buildInstruction(childDraft, prompt);
-          const { transformImageWithPrompt } = await import("@/lib/nanoBanana");
           const rawUrl = await transformImageWithPrompt(baseB64, instruction);
           const fitted = await fitImageToPrintableArea(rawUrl, childDraft);
           const prev = pagesIndex.byId[childId];
