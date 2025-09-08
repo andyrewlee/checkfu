@@ -1,2 +1,4 @@
-echo "Running lint + typecheck before commit..."
+echo "Formatting staged files with Prettier..." && \
+npm run -s lint-staged && \
+echo "Running lint + typecheck before commit..." && \
 npm run -s lint && npm run -s typecheck

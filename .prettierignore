@@ -1,0 +1,13 @@
+# Dependencies
+node_modules
+
+# Build outputs
+.next
+dist
+build
+out
+
+# Misc
+coverage
+tmp
+*.min.js
