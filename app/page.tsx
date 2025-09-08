@@ -1,5 +1,5 @@
-import { redirect } from "next/navigation";
+import Editor from "@/components/Editor";
 
-export default function HomeRedirect() {
-  redirect("/editor");
+export default function Page() {
+  return <Editor />;
 }
