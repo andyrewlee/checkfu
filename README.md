@@ -1,7 +1,7 @@
 # Checkfu — personalized learning materials for kindergarteners
 
 <p align="center">
-  <img width="1237" height="900" alt="Screenshot 2025-09-06 at 4 16 33 PM" src="https://github.com/user-attachments/assets/b7f99bdb-1d04-41ff-b77c-ddf842f6fc53" />
+  <img width="1200" height="631" alt="Screenshot 2025-09-08 at 2 38 46 AM" src="https://github.com/user-attachments/assets/b239f398-5809-4741-b589-ce1db764fe5e" />
 </p>
 
 Checkfu generates printable black-and-white Kindergarten worksheets and coloring pages. Each node is a single 8.5×11 page with one image; you can refine a page with a prompt to create a child variant. Pages can be exported to PDF to save and/or print.
