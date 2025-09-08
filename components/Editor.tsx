@@ -1,11 +1,23 @@
 "use client";
 
+/**
+ * Editor
+ * Node-based generator for printable K–1 pages
+ * - Graph of Page nodes rendered via React Flow
+ * - Each Page is one US Letter page with margins and a single image
+ * - Branching creates child variants from a parent image plus a prompt
+ * - Inspector manages Page Type, Standards, Style, System Prompt, and Prompt
+ */
+
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { ReactFlow, Background, Controls, addEdge, applyNodeChanges } from "@xyflow/react";
 import type { Edge, Node as RFNode, NodeChange, Connection, NodeTypes } from "@xyflow/react";
 import { jsPDF } from "jspdf";
 import PageNode, { type PageNodeData } from "@/components/nodes/PageNode";
-import { useRef as useReactRef } from 'react';
+
+/**
+ * Module: Types
+ */
 
 type Orientation = "portrait" | "landscape";
 // Left sidebar is always Pages now (no tabs)
@@ -28,11 +40,299 @@ type Page = {
   status?: string;
 };
 
-// EditorPage: Node-based generator for printable K–1 pages.
-// - Graph of Page nodes (React Flow)
-// - Each Page is a single 8.5×11 image with margins
-// - Branching uses the parent image + prompt to create a child variant
-// - Inspector manages Page Type, K standards, style, System Prompt + Prompt
+/**
+ * Module: Constants and narrow utilities
+ */
+
+const DPI = 96;
+
+const getLetterSizeIn = (o: Orientation) => (o === "portrait" ? { w: 8.5, h: 11 } : { w: 11, h: 8.5 });
+
+const nodeTypes = ({ page: PageNode } as unknown) as NodeTypes;
+
+const safeGetLocalStorage = (key: string) => {
+  try {
+    if (typeof window !== "undefined") return localStorage.getItem(key) || "";
+  } catch {
+    /* ignore */
+  }
+  return "";
+};
+
+function revokeIfBlob(url?: string) {
+  try {
+    if (url && url.startsWith("blob:")) URL.revokeObjectURL(url);
+  } catch {
+    /* ignore */
+  }
+}
+
+async function createImage(src: string) {
+  const img = new Image();
+  img.crossOrigin = "anonymous";
+  await new Promise<void>((res, rej) => {
+    img.onload = () => res();
+    img.onerror = () => rej(new Error("load failed"));
+    img.src = src;
+  });
+  return img;
+}
+
+/**
+ * Module: Image utilities — fit, trim, threshold, base64
+ */
+
+function computePrintablePx(p: Page): { pxW: number; pxH: number } {
+  const { w, h } = getLetterSizeIn(p.orientation);
+  const imgWIn = w - 2 * (p.marginInches || 0);
+  const imgHIn = h - 2 * (p.marginInches || 0);
+  return { pxW: Math.max(1, Math.round(imgWIn * DPI)), pxH: Math.max(1, Math.round(imgHIn * DPI)) };
+}
+
+async function blobUrlToPngBase64(url: string): Promise<string> {
+  const img = await createImage(url);
+  const max = 1650; // ~150dpi letter bound
+  const scale = Math.min(1, max / Math.max(img.width, img.height));
+  const w = Math.max(1, Math.round(img.width * scale));
+  const h = Math.max(1, Math.round(img.height * scale));
+  const c = document.createElement("canvas");
+  c.width = w;
+  c.height = h;
+  const ctx = c.getContext("2d");
+  if (!ctx) throw new Error("no ctx");
+  ctx.drawImage(img, 0, 0, w, h);
+  const dataUrl = c.toDataURL("image/png");
+  return dataUrl.replace(/^data:image\/png;base64,/, "");
+}
+
+async function fitImageToPrintableArea(url: string, p: Page): Promise<string> {
+  const { pxW, pxH } = computePrintablePx(p);
+  const img = await createImage(url);
+
+  const srcCanvas = document.createElement("canvas");
+  srcCanvas.width = img.width;
+  srcCanvas.height = img.height;
+  const srcCtx = srcCanvas.getContext("2d");
+  if (!srcCtx) return url;
+  srcCtx.drawImage(img, 0, 0);
+  const data = srcCtx.getImageData(0, 0, img.width, img.height).data;
+
+  const isWhite = (idx: number) => {
+    const r = data[idx], g = data[idx + 1], b = data[idx + 2], a = data[idx + 3];
+    if (a < 8) return true;
+    const y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    return y > 250;
+  };
+
+  let top = 0, bottom = img.height - 1, left = 0, right = img.width - 1;
+  scanTop: for (let y = 0; y < img.height; y++) {
+    for (let x = 0; x < img.width; x += 2) {
+      const i = (y * img.width + x) * 4;
+      if (!isWhite(i)) { top = Math.max(0, y - 1); break scanTop; }
+    }
+  }
+  scanBottom: for (let y = img.height - 1; y >= 0; y--) {
+    for (let x = 0; x < img.width; x += 2) {
+      const i = (y * img.width + x) * 4;
+      if (!isWhite(i)) { bottom = Math.min(img.height - 1, y + 1); break scanBottom; }
+    }
+  }
+  scanLeft: for (let x = 0; x < img.width; x++) {
+    for (let y = 0; y < img.height; y += 2) {
+      const i = (y * img.width + x) * 4;
+      if (!isWhite(i)) { left = Math.max(0, x - 1); break scanLeft; }
+    }
+  }
+  scanRight: for (let x = img.width - 1; x >= 0; x--) {
+    for (let y = 0; y < img.height; y += 2) {
+      const i = (y * img.width + x) * 4;
+      if (!isWhite(i)) { right = Math.min(img.width - 1, x + 1); break scanRight; }
+    }
+  }
+
+  let sx = Math.max(0, left), sy = Math.max(0, top);
+  let sw = Math.max(1, right - left + 1), sh = Math.max(1, bottom - top + 1);
+
+  const bleed = 0;
+  if (sw < img.width || sh < img.height) {
+    sx = Math.min(Math.max(0, sx + bleed), img.width - 1);
+    sy = Math.min(Math.max(0, sy + bleed), img.height - 1);
+    sw = Math.max(1, Math.min(img.width - sx, sw - bleed * 2));
+    sh = Math.max(1, Math.min(img.height - sy, sh - bleed * 2));
+  }
+
+  const c = document.createElement("canvas");
+  c.width = pxW;
+  c.height = pxH;
+  const ctx = c.getContext("2d");
+  if (!ctx) return url;
+  ctx.imageSmoothingQuality = "high";
+
+  const pad = Math.max(6, Math.round(Math.min(pxW, pxH) * 0.02));
+  const availW = Math.max(1, pxW - 2 * pad);
+  const availH = Math.max(1, pxH - 2 * pad);
+  const scale = Math.min(availW / Math.max(1, sw), availH / Math.max(1, sh));
+  const dw = Math.max(1, Math.round(sw * scale));
+  const dh = Math.max(1, Math.round(sh * scale));
+  const dx = pad + Math.floor((availW - dw) / 2);
+  const dy = pad + Math.floor((availH - dh) / 2);
+
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, pxW, pxH);
+  ctx.drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh);
+  return c.toDataURL("image/png");
+}
+
+async function thresholdToDataUrl(srcUrl: string, threshold: number): Promise<string> {
+  const img = await createImage(srcUrl);
+  const maxW = 1024;
+  const scale = Math.min(1, maxW / img.width);
+  const w = Math.max(1, Math.round(img.width * scale));
+  const h = Math.max(1, Math.round(img.height * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("no ctx");
+  ctx.drawImage(img, 0, 0, w, h);
+  const imageData = ctx.getImageData(0, 0, w, h);
+  const d = imageData.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const r = d[i], g = d[i + 1], b = d[i + 2];
+    const y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    const v = y >= threshold ? 255 : 0;
+    d[i] = d[i + 1] = d[i + 2] = v;
+    d[i + 3] = 255;
+  }
+  ctx.putImageData(imageData, 0, 0);
+  return canvas.toDataURL("image/png");
+}
+
+/**
+ * Module: Standards loader — flatten CCSS Kindergarten structure
+ */
+
+async function loadKStandards(): Promise<{ code: string; description: string }[]> {
+  const res = await fetch('/ccss_kindergarten_math_standards.json');
+  if (!res.ok) return [];
+  const data = await res.json();
+  const flat: { code: string; description: string }[] = [];
+  for (const d of data.domains || []) {
+    for (const c of d.clusters || []) {
+      for (const s of c.standards || []) {
+        if (s.code && s.description) flat.push({ code: s.code, description: s.description });
+        if (Array.isArray(s.components)) {
+          for (const comp of s.components) {
+            if (comp.code && comp.description) flat.push({ code: comp.code, description: comp.description });
+          }
+        }
+      }
+    }
+  }
+  return flat;
+}
+
+/**
+ * Module: Prompt builder — system plus user prompt
+ */
+
+function computeSystemPrompt(p: Page, standardsCatalog: { code: string; description: string }[]): string {
+  const isWorksheet = (p.pageType || 'coloring') === 'worksheet';
+  const { w, h } = getLetterSizeIn(p.orientation);
+  const letter = `${w}×${h} ${p.orientation}`;
+  const margin = (p.marginInches ?? 0.5).toFixed(2);
+  const printRules = [
+    `Print target: US Letter ${letter}. Keep all content inside ${margin} inch margins.`,
+    "Output: one black and white line art image for print.",
+    "Style: thick uniform outlines, high contrast, large closed shapes. No gray tones. No shading. No halftones. No photo textures.",
+    "Background: white only.",
+    "Exclusions: no frames, borders, watermarks, signatures, logos, or captions.",
+    "Aspect: do not change the provided orientation.",
+    "If a mask is provided, change only masked regions and keep all unmasked regions identical.",
+  ].join(' ');
+  if (isWorksheet) {
+    const selected = p.standards || [];
+    const codes = selected.join(', ');
+    const lookup = new Map(standardsCatalog.map(s => [s.code, s.description] as const));
+    const descs = selected.map(code => {
+      const d = lookup.get(code) || '';
+      return d ? `${code}: ${d}` : '';
+    }).filter(Boolean);
+    const ccSummary = codes ? `Common Core Kindergarten focus: ${codes}. ` : 'Common Core Kindergarten math practices. ';
+    const ccDetail = descs.length ? `Target standards: ${descs.join('; ')}. ` : '';
+    const wk = [
+      'Purpose: a solvable worksheet that a kindergarten student can complete independently.',
+      '1) Provide exactly one short instruction line at the top in simple English.',
+      '2) Use concrete visual math tools such as ten frames, number lines, dot cards, or simple manipulatives.',
+      '3) Quantities never exceed 10. Prefer numerals for labels and examples.',
+      '4) Use three to six tasks or one main task with three to six parts.',
+      '5) Provide large answer areas about 1.25 inch squares or lines with generous white space.',
+      '6) Layout flows left to right then top to bottom. Keep balance and clarity.',
+      '7) High contrast line art suitable for printing.'
+    ].join(' ');
+    const wkNegatives = [
+      'Do not add titles or headers.',
+      'Do not add decorative frames.',
+      'Do not place elements on or past the margins.',
+      'Do not include stickers, emojis, photographs, or gray fills.'
+    ].join(' ');
+    return `${ccSummary}${ccDetail}${wk} ${printRules} ${wkNegatives}`.trim();
+  }
+  const styleName = p.coloringStyle || 'classic';
+  const styleText = styleName === 'anime'
+    ? 'Style: anime for children. Clean inked outlines, friendly faces, very large fill areas. No screen tones.'
+    : styleName === 'retro'
+      ? 'Style: retro nineteen sixty cartoon look. Bold contour lines, simple geometry, playful characters.'
+      : 'Style: classic coloring book. Bold outlines and large closed regions that are easy to color.';
+  const col = [
+    'Purpose: a kid friendly coloring page with one clear subject and readable shapes.',
+    '1) Composition fills the printable area while preserving balanced white space.',
+    '2) Use thick outlines and closed shapes to avoid tiny slivers.',
+    '3) No text at all.',
+    '4) High contrast line art that prints cleanly.'
+  ].join(' ');
+  const colNegatives = [
+    'Do not use gray tones or shading.',
+    'Do not use fine hatching or dense patterns.',
+    'Do not add borders, titles, captions, watermarks, or logos.',
+    'Do not place elements on or past the margins.'
+  ].join(' ');
+  return `${styleText} ${col} ${printRules} ${colNegatives}`.trim();
+}
+
+/**
+ * Module: PDF helpers
+ */
+
+async function addPageToJsPdf(pdf: jsPDF, page: Page) {
+  const { w: pageW, h: pageH } = getLetterSizeIn(page.orientation);
+  const m = page.marginInches;
+  const imgW = pageW - 2 * m;
+  const imgH = pageH - 2 * m;
+  const img = await createImage(page.imageUrl as string);
+  const canvas = document.createElement('canvas');
+  const dpr = 2;
+  const pxW = Math.round(imgW * DPI), pxH = Math.round(imgH * DPI);
+  canvas.width = pxW * dpr; canvas.height = pxH * dpr;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('No canvas context');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const scale = Math.min(pxW / img.width, pxH / img.height);
+  const dw = Math.round(img.width * scale), dh = Math.round(img.height * scale);
+  const dx = Math.floor((pxW - dw) / 2), dy = Math.floor((pxH - dh) / 2);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, pxW, pxH);
+  ctx.drawImage(img, dx, dy, dw, dh);
+  const dataUrl = canvas.toDataURL('image/png');
+  pdf.addImage(dataUrl, 'PNG', m, m, imgW, imgH, undefined, 'FAST');
+  const codes = (page.standards || []).join(', ');
+  if (codes) { pdf.setFontSize(8); pdf.text(`Standards: ${codes}`, m, pageH - 0.3); }
+}
+
+/**
+ * Module: Editor component
+ */
+
 export default function Editor() {
   const [pages, setPages] = useState<Page[]>(() => []);
   const [currentPageId, setCurrentPageId] = useState<string | null>(null);
@@ -48,24 +348,9 @@ export default function Editor() {
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch('/ccss_kindergarten_math_standards.json');
-        if (!res.ok) return;
-        const data = await res.json();
-        const flat: { code: string; description: string }[] = [];
-        for (const d of data.domains || []) {
-          for (const c of d.clusters || []) {
-            for (const s of c.standards || []) {
-              if (s.code && s.description) flat.push({ code: s.code, description: s.description });
-              if (Array.isArray(s.components)) {
-                for (const comp of s.components) {
-                  if (comp.code && comp.description) flat.push({ code: comp.code, description: comp.description });
-                }
-              }
-            }
-          }
-        }
+        const flat = await loadKStandards();
         if (!cancelled) setStandardsCatalog(flat);
-      } catch {}
+      } catch { /* ignore */ }
     })();
     return () => { cancelled = true; };
   }, []);
@@ -86,14 +371,8 @@ export default function Editor() {
   }, [currentPageId]);
   // Highlight API key button if missing key
   useEffect(() => {
-    try {
-      if (typeof window !== 'undefined') {
-        setNeedsApiKey(!localStorage.getItem('CHECKFU_GEMINI_API_KEY'));
-      }
-    } catch {}
+    setNeedsApiKey(!safeGetLocalStorage('CHECKFU_GEMINI_API_KEY'));
   }, [showSettings]);
-  // Memoize nodeTypes to avoid React Flow warning about new object each render
-  const nodeTypes = useMemo(() => ({ page: PageNode }) as NodeTypes, []);
 
   function pushToast(text: string, kind: 'error'|'info'|'success' = 'info') {
     const id = crypto.randomUUID();
@@ -133,225 +412,18 @@ export default function Editor() {
     setPages((ps) => ps.map((p) => (p.id === id ? { ...p, ...patch } : p)));
   }
 
-  // Compute printable area size in CSS pixels (96 DPI reference)
-  function computePrintablePx(p: Page): { pxW: number; pxH: number } {
-    const DPI = 96;
-    const pageWIn = p.orientation === 'portrait' ? 8.5 : 11;
-    const pageHIn = p.orientation === 'portrait' ? 11 : 8.5;
-    const imgWIn = pageWIn - 2 * (p.marginInches || 0);
-    const imgHIn = pageHIn - 2 * (p.marginInches || 0);
-    return { pxW: Math.max(1, Math.round(imgWIn * DPI)), pxH: Math.max(1, Math.round(imgHIn * DPI)) };
-  }
-
-  // Convert image to 1-bit black/white at a given threshold
+  // Convert image to 1‑bit black/white at a given threshold
   const applyThreshold = useCallback(async (pageId: string, threshold: number) => {
     const page = pages.find((p) => p.id === pageId);
     if (!page || !page.originalImageUrl) return;
-    const img = new Image();
-    img.crossOrigin = "anonymous";
-    const src = page.originalImageUrl;
-    await new Promise<void>((res, rej) => {
-      img.onload = () => res();
-      img.onerror = () => rej(new Error("Failed to load image"));
-      img.src = src;
-    });
-    const maxW = 1024;
-    const scale = Math.min(1, maxW / img.width);
-    const w = Math.max(1, Math.round(img.width * scale));
-    const h = Math.max(1, Math.round(img.height * scale));
-    const canvas = document.createElement("canvas");
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    ctx.drawImage(img, 0, 0, w, h);
-    const imageData = ctx.getImageData(0, 0, w, h);
-    const d = imageData.data;
-    for (let i = 0; i < d.length; i += 4) {
-      const r = d[i], g = d[i + 1], b = d[i + 2];
-      const y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-      const v = y >= threshold ? 255 : 0;
-      d[i] = d[i + 1] = d[i + 2] = v;
-      d[i + 3] = 255;
-    }
-    ctx.putImageData(imageData, 0, 0);
-    const url = canvas.toDataURL("image/png");
     try {
-      if (page.imageUrl && page.imageUrl.startsWith('blob:')) URL.revokeObjectURL(page.imageUrl);
-    } catch { }
-    setPagePatch(pageId, { imageUrl: url, bwThreshold: threshold });
+      const url = await thresholdToDataUrl(page.originalImageUrl, threshold);
+      revokeIfBlob(page.imageUrl);
+      setPagePatch(pageId, { imageUrl: url, bwThreshold: threshold });
+    } catch {
+      /* ignore */
+    }
   }, [pages]);
-
-  // duplicate applyThreshold removed; see earlier definition
-
-  // Fit any image URL to exactly the printable area (cover crop to fill) and return a PNG data URL.
-  // Also auto-trims outer white margins and lightly crops inside any heavy border lines.
-  const fitImageToPrintableArea = useCallback(async (url: string, p: Page): Promise<string> => {
-    const { pxW, pxH } = computePrintablePx(p);
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-    await new Promise<void>((res, rej) => { img.onload = () => res(); img.onerror = () => rej(new Error('load failed')); img.src = url; });
-    // aspect ratio target (not used with contain placement)
-
-    // First, auto-trim outer white margins from the source to remove unnecessary gutters around content.
-    const srcCanvas = document.createElement('canvas');
-    srcCanvas.width = img.width; srcCanvas.height = img.height;
-    const srcCtx = srcCanvas.getContext('2d'); if (!srcCtx) return url;
-    srcCtx.drawImage(img, 0, 0);
-    const data = srcCtx.getImageData(0, 0, img.width, img.height).data;
-    const isWhite = (idx: number) => {
-      const r = data[idx], g = data[idx + 1], b = data[idx + 2], a = data[idx + 3];
-      if (a < 8) return true; // treat near-transparent as white background
-      // luminance threshold; allow very light gray
-      const y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-      return y > 250;
-    };
-    let top = 0, bottom = img.height - 1, left = 0, right = img.width - 1;
-    // scan from top
-    scanTop: for (let y = 0; y < img.height; y++) {
-      for (let x = 0; x < img.width; x += 2) {
-        const i = (y * img.width + x) * 4;
-        if (!isWhite(i)) { top = Math.max(0, y - 1); break scanTop; }
-      }
-    }
-    // scan from bottom
-    scanBottom: for (let y = img.height - 1; y >= 0; y--) {
-      for (let x = 0; x < img.width; x += 2) {
-        const i = (y * img.width + x) * 4;
-        if (!isWhite(i)) { bottom = Math.min(img.height - 1, y + 1); break scanBottom; }
-      }
-    }
-    // scan from left
-    scanLeft: for (let x = 0; x < img.width; x++) {
-      for (let y = 0; y < img.height; y += 2) {
-        const i = (y * img.width + x) * 4;
-        if (!isWhite(i)) { left = Math.max(0, x - 1); break scanLeft; }
-      }
-    }
-    // scan from right
-    scanRight: for (let x = img.width - 1; x >= 0; x--) {
-      for (let y = 0; y < img.height; y += 2) {
-        const i = (y * img.width + x) * 4;
-        if (!isWhite(i)) { right = Math.min(img.width - 1, x + 1); break scanRight; }
-      }
-    }
-    let sx = Math.max(0, left), sy = Math.max(0, top);
-    let sw = Math.max(1, right - left + 1), sh = Math.max(1, bottom - top + 1);
-
-    // Lightly crop inside any heavy border lines by a few pixels (bleed), if the trim changed the rect.
-    const bleed = 0; // avoid cropping into heavy border lines
-    if (sw < img.width || sh < img.height) {
-      sx = Math.min(Math.max(0, sx + bleed), img.width - 1);
-      sy = Math.min(Math.max(0, sy + bleed), img.height - 1);
-      sw = Math.max(1, Math.min(img.width - sx, sw - bleed * 2));
-      sh = Math.max(1, Math.min(img.height - sy, sh - bleed * 2));
-    }
-
-    // Now place the trimmed rect using CONTAIN (no further cropping) with a small inner padding.
-    const c = document.createElement('canvas'); c.width = pxW; c.height = pxH;
-    const ctx = c.getContext('2d'); if (!ctx) return url;
-    ctx.imageSmoothingQuality = 'high';
-    // breathing room inside printable area so content never touches the margins
-    const pad = Math.max(6, Math.round(Math.min(pxW, pxH) * 0.02));
-    const availW = Math.max(1, pxW - 2 * pad);
-    const availH = Math.max(1, pxH - 2 * pad);
-    const scale = Math.min(availW / Math.max(1, sw), availH / Math.max(1, sh));
-    const dw = Math.max(1, Math.round(sw * scale));
-    const dh = Math.max(1, Math.round(sh * scale));
-    const dx = pad + Math.floor((availW - dw) / 2);
-    const dy = pad + Math.floor((availH - dh) / 2);
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, pxW, pxH);
-    ctx.drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh);
-    return c.toDataURL('image/png');
-  }, []);
-
-  // Build an explicit, print oriented System Prompt from selections
-  const computeSystemPrompt = useCallback((p: Page): string => {
-    const isWorksheet = (p.pageType || "worksheet") === "worksheet";
-
-    // Orientation and margins for letter
-    const letter = p.orientation === "landscape" ? "11×8.5 landscape" : "8.5×11 portrait";
-    const margin = (p.marginInches ?? 0.5).toFixed(2);
-
-    // Shared print rules for Nano Banana
-    const printRules = [
-      `Print target: US Letter ${letter}. Keep all content inside ${margin} inch margins.`,
-      "Output: one black and white line art image for print.",
-      "Style: thick uniform outlines, high contrast, large closed shapes. No gray tones. No shading. No halftones. No photo textures.",
-      "Background: white only.",
-      "Exclusions: no frames, borders, watermarks, signatures, logos, or captions.",
-      "Aspect: do not change the provided orientation.",
-      "If a mask is provided, change only masked regions and keep all unmasked regions identical."
-    ].join(" ");
-
-    if (isWorksheet) {
-      // Standards summary
-      const selected = p.standards || [];
-      const codes = selected.join(", ");
-      const lookup = new Map(standardsCatalog.map(s => [s.code, s.description] as const));
-      const descs = selected
-        .map(code => {
-          const d = lookup.get(code) || "";
-          return d ? `${code}: ${d}` : "";
-        })
-        .filter(Boolean);
-
-      const ccSummary = codes
-        ? `Common Core Kindergarten focus: ${codes}. `
-        : "Common Core Kindergarten math practices. ";
-      const ccDetail = descs.length ? `Target standards: ${descs.join("; ")}. ` : "";
-
-      // Worksheet specific guidance for K
-      const wk = [
-        "Purpose: a solvable worksheet that a kindergarten student can complete independently.",
-        "1) Provide exactly one short instruction line at the top in simple English.",
-        "2) Use concrete visual math tools such as ten frames, number lines, dot cards, or simple manipulatives.",
-        "3) Quantities never exceed 10. Prefer numerals for labels and examples.",
-        "4) Use three to six tasks or one main task with three to six parts.",
-        "5) Provide large answer areas about 1.25 inch squares or lines with generous white space.",
-        "6) Layout flows from left to right and then top to bottom. Keep balance and clarity.",
-        "7) High contrast line art suitable for printing."
-      ].join(" ");
-
-      const wkNegatives = [
-        "Do not add titles or headers.",
-        "Do not add decorative frames.",
-        "Do not place elements on or past the margins.",
-        "Do not include stickers, emojis, photographs, or gray fills."
-      ].join(" ");
-
-      return `${ccSummary}${ccDetail}${wk} ${printRules} ${wkNegatives}`.trim();
-    }
-
-    // Coloring page styles
-    const styleName = p.coloringStyle || "classic";
-    const styleText =
-      styleName === "anime"
-        ? "Style: anime for children. Clean inked outlines, friendly faces, very large fill areas. No screen tones."
-        : styleName === "retro"
-          ? "Style: retro nineteen sixty cartoon look. Bold contour lines, simple geometry, playful characters."
-          : "Style: classic coloring book. Bold outlines and large closed regions that are easy to color.";
-
-    const col = [
-      "Purpose: a kid friendly coloring page with one clear subject and readable shapes.",
-      "1) Composition fills the printable area while preserving balanced white space.",
-      "2) Use thick outlines and closed shapes to avoid tiny slivers.",
-      "3) No text at all.",
-      "4) High contrast line art that prints cleanly."
-    ].join(" ");
-
-    const colNegatives = [
-      "Do not use gray tones or shading.",
-      "Do not use fine hatching or dense patterns.",
-      "Do not add borders, titles, captions, watermarks, or logos.",
-      "Do not place elements on or past the margins."
-    ].join(" ");
-
-    return `${styleText} ${col} ${printRules} ${colNegatives}`.trim();
-  }, [standardsCatalog]);
-
-  // Keep node list in sync with page list (preserve selection) — declared after callbacks
 
   // Auto-refresh system prompt when selections change unless edited
   const standardsKey = useMemo(() => (currentPage?.standards || []).join('|'), [currentPage?.standards]);
@@ -359,10 +431,10 @@ export default function Editor() {
     setPages((ps) => ps.map((p) => {
       if (p.id !== currentPageId) return p;
       if (p.systemPromptEdited) return p;
-      const sys = computeSystemPrompt(p);
+      const sys = computeSystemPrompt(p, standardsCatalog);
       return { ...p, systemPrompt: sys };
     }));
-  }, [currentPage?.pageType, currentPage?.coloringStyle, currentPage?.orientation, currentPage?.marginInches, standardsKey, computeSystemPrompt, currentPageId]);
+  }, [currentPage?.pageType, currentPage?.coloringStyle, currentPage?.orientation, currentPage?.marginInches, standardsKey, standardsCatalog, currentPageId]);
 
   const addPageFromImage = useCallback((url: string, title = "Image", overrides?: Partial<Page>): string => {
     const id = crypto.randomUUID();
@@ -449,26 +521,6 @@ export default function Editor() {
   }, [pages]);
   useEffect(() => { quickGenerateRef.current = quickGenerate; }, [quickGenerate]);
 
-  async function blobUrlToPngBase64(url: string): Promise<string> {
-    // draw to canvas -> PNG dataURL -> strip prefix
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-    await new Promise<void>((res, rej) => { img.onload = () => res(); img.onerror = () => rej(new Error('load failed')); img.src = url; });
-    const max = 1650; // ~150dpi letter bound
-    const scale = Math.min(1, max / Math.max(img.width, img.height));
-    const w = Math.max(1, Math.round(img.width * scale));
-    const h = Math.max(1, Math.round(img.height * scale));
-    const c = document.createElement('canvas');
-    c.width = w; c.height = h;
-    const ctx = c.getContext('2d');
-    if (!ctx) throw new Error('no ctx');
-    ctx.drawImage(img, 0, 0, w, h);
-    const dataUrl = c.toDataURL('image/png');
-    return dataUrl.replace(/^data:image\/png;base64,/, '');
-  }
-
-  
-
   function buildInstructionPrompt(page: Page, userPrompt: string): string {
     const sys = (page.systemPrompt || '').trim();
     const user = (userPrompt || '').trim();
@@ -527,8 +579,6 @@ export default function Editor() {
     await generateInto(childId, prompt, childDraft);
   }
   useEffect(() => { generateChildFromParentRef.current = generateChildFromParent; });
-
-  
 
   const deleteNode = useCallback((pageId: string) => {
     if (!confirm("Delete this node?")) return;
@@ -687,32 +737,9 @@ export default function Editor() {
     const pdf = new jsPDF({ orientation: first.orientation, unit: 'in', format: 'letter' });
     for (let i = 0; i < pagesToExport.length; i++) {
       const page = pagesToExport[i];
+      if (!page.imageUrl) continue;
       if (i > 0) pdf.addPage('letter', page.orientation);
-      const pageW = page.orientation === 'portrait' ? 8.5 : 11;
-      const pageH = page.orientation === 'portrait' ? 11 : 8.5;
-      const m = page.marginInches;
-      const imgW = pageW - 2 * m;
-      const imgH = pageH - 2 * m;
-      try {
-        const img = new Image();
-        img.crossOrigin = 'anonymous';
-        await new Promise<void>((res, rej) => { img.onload = () => res(); img.onerror = () => rej(new Error('Failed to load image')); img.src = page.imageUrl || ''; });
-        const canvas = document.createElement('canvas');
-        const dpr = 2;
-        const pxW = Math.round(imgW * 96), pxH = Math.round(imgH * 96);
-        canvas.width = pxW * dpr; canvas.height = pxH * dpr;
-        const ctx = canvas.getContext('2d'); if (!ctx) continue;
-        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-        const scale = Math.min(pxW / img.width, pxH / img.height);
-        const dw = Math.round(img.width * scale); const dh = Math.round(img.height * scale);
-        const dx = Math.floor((pxW - dw) / 2); const dy = Math.floor((pxH - dh) / 2);
-        ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, pxW, pxH);
-        ctx.drawImage(img, dx, dy, dw, dh);
-        const dataUrl = canvas.toDataURL('image/png');
-        pdf.addImage(dataUrl, 'PNG', m, m, imgW, imgH, undefined, 'FAST');
-        const codes = (page.standards || []).join(', ');
-        if (codes) { pdf.setFontSize(8); pdf.text(`Standards: ${codes}`, m, pageH - 0.3); }
-      } catch { /* skip page on error */ }
+      try { await addPageToJsPdf(pdf, page); } catch { /* skip page on error */ }
     }
     pdf.save('checkfu.pdf');
   }
@@ -848,7 +875,7 @@ export default function Editor() {
               nodeTypes={nodeTypes}
               onNodesChange={onNodesChange}
               onNodeClick={(_, n) => setCurrentPageId(n.id)}
-              onConnect={(c: Connection) => setEdges((es) => addEdge(c, es))}
+            onConnect={(c: Connection) => setEdges((es) => addEdge(c, es))}
               noPanClassName="nopan"
               noDragClassName="nodrag"
               noWheelClassName="nowheel"
@@ -1022,9 +1049,9 @@ export default function Editor() {
   );
 }
 
-// Inpainting modal component disabled for now
-
-// Compact multi-select for K standards with simple search support
+/**
+ * Module: StandardsMultiSelect — compact multi-select with simple search
+ */
 function StandardsMultiSelect({
   id,
   options,
@@ -1036,7 +1063,7 @@ function StandardsMultiSelect({
   value: string[];
   onChange: (vals: string[]) => void;
 }) {
-  const selectRef = useReactRef<HTMLSelectElement | null>(null);
+  const selectRef = useRef<HTMLSelectElement | null>(null);
   useEffect(() => {
     const sel = selectRef.current; if (!sel) return;
     const onRebuild = () => {
