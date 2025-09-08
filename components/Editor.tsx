@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { ReactFlow, Background, Controls, addEdge, applyNodeChanges } from "@xyflow/react";
 import type { Edge, Node as RFNode, NodeChange, Connection, NodeTypes } from "@xyflow/react";
 import { jsPDF } from "jspdf";
@@ -72,6 +72,12 @@ export default function Editor() {
   const [toasts, setToasts] = useState<{ id: string; kind: 'error'|'info'|'success'; text: string }[]>([]);
   const lastQuickGenAtRef = useRef<number>(0);
   const [needsApiKey, setNeedsApiKey] = useState(false);
+  // Stable handler refs to avoid dependency cycles in callbacks/effects
+  const branchFromRef = useRef<(id: string) => void>(() => {});
+  const branchFromWithPromptRef = useRef<(id: string, prompt: string) => Promise<void>>(async () => {});
+  const generateChildFromParentRef = useRef<(childId: string, parent: Page, prompt: string) => Promise<void>>(async () => {});
+  const deleteNodeRef = useRef<(id: string) => void>(() => {});
+  const quickGenerateRef = useRef<(id: string) => Promise<void>>(async () => {});
   // Keep current page visible in the sidebar
   useEffect(() => {
     if (!currentPageId) return;
@@ -86,10 +92,8 @@ export default function Editor() {
       }
     } catch {}
   }, [showSettings]);
-  // Inpainting disabled for now
-
   // Memoize nodeTypes to avoid React Flow warning about new object each render
-  const nodeTypes = useMemo<NodeTypes>(() => ({ page: PageNode as any }), []);
+  const nodeTypes = useMemo(() => ({ page: PageNode }) as NodeTypes, []);
 
   function pushToast(text: string, kind: 'error'|'info'|'success' = 'info') {
     const id = crypto.randomUUID();
@@ -97,39 +101,7 @@ export default function Editor() {
     setTimeout(() => setToasts((ts) => ts.filter((t) => t.id !== id)), 4000);
   }
 
-  // Helper to build a React Flow node from a Page
-  function buildNode(p: Page, position: { x: number; y: number }): PageRFNode {
-    return {
-      id: p.id,
-      type: 'page',
-      position,
-      data: {
-        id: p.id,
-        title: p.title,
-        orientation: p.orientation,
-        marginInches: p.marginInches,
-        imageUrl: p.imageUrl,
-        loading: !!p.generating,
-        loadingText: p.status,
-        onBranch: (pid) => branchFrom(pid),
-        onBranchWithPrompt: (pid, prompt) => branchFromWithPrompt(pid, prompt),
-        onDelete: (pid) => deleteNode(pid),
-        onQuickGenerate: (pid) => quickGenerate(pid),
-      },
-    };
-  }
-
-  // Keep node list in sync with page list (preserve selection)
-  useEffect(() => {
-    setNodes((old) =>
-      pages.map((p, i) => {
-        const existing = old.find((n) => n.id === p.id);
-        const pos = existing?.position || { x: (i % 3) * 380, y: Math.floor(i / 3) * 480 };
-        const node = buildNode(p, pos);
-        return { ...node, selected: existing?.selected ?? (p.id === currentPageId) };
-      })
-    );
-  }, [pages, currentPageId]);
+  
 
   const onNodesChange = (changes: NodeChange<PageRFNode>[]) => {
     const removedIds = new Set(
@@ -149,13 +121,13 @@ export default function Editor() {
     }
   };
 
-  function deleteNodes(ids: string[]) {
+  const deleteNodes = useCallback((ids: string[]) => {
     if (!ids.length) return;
     setEdges((es) => es.filter((e) => !ids.includes(e.source) && !ids.includes(e.target)));
     setPages((ps) => ps.filter((p) => !ids.includes(p.id)));
     setNodes((ns) => ns.filter((n) => !ids.includes(n.id)));
     setCurrentPageId((prev) => (prev && ids.includes(prev) ? (pages.find((p) => !ids.includes(p.id))?.id ?? null) : prev));
-  }
+  }, [pages]);
 
   function setPagePatch(id: string, patch: Partial<Page>) {
     setPages((ps) => ps.map((p) => (p.id === id ? { ...p, ...patch } : p)));
@@ -171,9 +143,50 @@ export default function Editor() {
     return { pxW: Math.max(1, Math.round(imgWIn * DPI)), pxH: Math.max(1, Math.round(imgHIn * DPI)) };
   }
 
+  // Convert image to 1-bit black/white at a given threshold
+  const applyThreshold = useCallback(async (pageId: string, threshold: number) => {
+    const page = pages.find((p) => p.id === pageId);
+    if (!page || !page.originalImageUrl) return;
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    const src = page.originalImageUrl;
+    await new Promise<void>((res, rej) => {
+      img.onload = () => res();
+      img.onerror = () => rej(new Error("Failed to load image"));
+      img.src = src;
+    });
+    const maxW = 1024;
+    const scale = Math.min(1, maxW / img.width);
+    const w = Math.max(1, Math.round(img.width * scale));
+    const h = Math.max(1, Math.round(img.height * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.drawImage(img, 0, 0, w, h);
+    const imageData = ctx.getImageData(0, 0, w, h);
+    const d = imageData.data;
+    for (let i = 0; i < d.length; i += 4) {
+      const r = d[i], g = d[i + 1], b = d[i + 2];
+      const y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+      const v = y >= threshold ? 255 : 0;
+      d[i] = d[i + 1] = d[i + 2] = v;
+      d[i + 3] = 255;
+    }
+    ctx.putImageData(imageData, 0, 0);
+    const url = canvas.toDataURL("image/png");
+    try {
+      if (page.imageUrl && page.imageUrl.startsWith('blob:')) URL.revokeObjectURL(page.imageUrl);
+    } catch { }
+    setPagePatch(pageId, { imageUrl: url, bwThreshold: threshold });
+  }, [pages]);
+
+  // duplicate applyThreshold removed; see earlier definition
+
   // Fit any image URL to exactly the printable area (cover crop to fill) and return a PNG data URL.
   // Also auto-trims outer white margins and lightly crops inside any heavy border lines.
-  async function fitImageToPrintableArea(url: string, p: Page): Promise<string> {
+  const fitImageToPrintableArea = useCallback(async (url: string, p: Page): Promise<string> => {
     const { pxW, pxH } = computePrintablePx(p);
     const img = new Image();
     img.crossOrigin = 'anonymous';
@@ -251,10 +264,10 @@ export default function Editor() {
     ctx.fillRect(0, 0, pxW, pxH);
     ctx.drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh);
     return c.toDataURL('image/png');
-  }
+  }, []);
 
   // Build an explicit, print oriented System Prompt from selections
-  function computeSystemPrompt(p: Page): string {
+  const computeSystemPrompt = useCallback((p: Page): string => {
     const isWorksheet = (p.pageType || "worksheet") === "worksheet";
 
     // Orientation and margins for letter
@@ -336,9 +349,12 @@ export default function Editor() {
     ].join(" ");
 
     return `${styleText} ${col} ${printRules} ${colNegatives}`.trim();
-  }
+  }, [standardsCatalog]);
+
+  // Keep node list in sync with page list (preserve selection) — declared after callbacks
 
   // Auto-refresh system prompt when selections change unless edited
+  const standardsKey = useMemo(() => (currentPage?.standards || []).join('|'), [currentPage?.standards]);
   useEffect(() => {
     setPages((ps) => ps.map((p) => {
       if (p.id !== currentPageId) return p;
@@ -346,9 +362,9 @@ export default function Editor() {
       const sys = computeSystemPrompt(p);
       return { ...p, systemPrompt: sys };
     }));
-  }, [currentPage?.pageType, currentPage?.coloringStyle, currentPage?.orientation, currentPage?.marginInches, (currentPage?.standards || []).join('|')]);
+  }, [currentPage?.pageType, currentPage?.coloringStyle, currentPage?.orientation, currentPage?.marginInches, standardsKey, computeSystemPrompt, currentPageId]);
 
-  function addPageFromImage(url: string, title = "Image", overrides?: Partial<Page>): string {
+  const addPageFromImage = useCallback((url: string, title = "Image", overrides?: Partial<Page>): string => {
     const id = crypto.randomUUID();
     const newPage: Page = {
       id,
@@ -365,28 +381,26 @@ export default function Editor() {
       systemPromptEdited: false,
       ...overrides,
     };
-    const parentNode = currentPageId ? nodes.find((n) => n.id === currentPageId) : undefined;
-    const pos = parentNode ? { x: parentNode.position.x + 380, y: parentNode.position.y } : { x: 0, y: 0 };
     setPages((ps) => ps.concat(newPage));
-    setNodes((ns) => ns.concat(buildNode(newPage, pos)));
     setCurrentPageId(id);
     // apply default threshold
     void applyThreshold(id, newPage.bwThreshold || 200);
     return id;
-  }
+  }, [applyThreshold]);
 
   // Branch prompt modal state
   const [branchingParentId, setBranchingParentId] = useState<string | null>(null);
   const [branchPrompt, setBranchPrompt] = useState<string>("");
 
-  function branchFrom(parentId: string) {
+  const branchFrom = useCallback((parentId: string) => {
     const parent = pages.find((p) => p.id === parentId);
     if (!parent) return;
     setBranchingParentId(parentId);
     setBranchPrompt(parent.prompt || "");
-  }
+  }, [pages]);
+  useEffect(() => { branchFromRef.current = branchFrom; }, [branchFrom]);
 
-  async function branchFromWithPrompt(parentId: string, prompt: string) {
+  const branchFromWithPrompt = useCallback(async (parentId: string, prompt: string) => {
     const parent = pages.find((p) => p.id === parentId);
     if (!parent) return;
     const id = crypto.randomUUID();
@@ -397,15 +411,33 @@ export default function Editor() {
     setNodes((ns) => {
       // unselect all existing nodes and add the new one as selected
       const cleared = ns.map((n) => ({ ...n, selected: false }));
-      const newNode = buildNode(child, newPos);
+      const newNode: PageRFNode = {
+        id: child.id,
+        type: 'page',
+        position: newPos,
+        data: {
+          id: child.id,
+          title: child.title,
+          orientation: child.orientation,
+          marginInches: child.marginInches,
+          imageUrl: child.imageUrl,
+          loading: !!child.generating,
+          loadingText: child.status,
+          onBranch: (pid: string) => branchFromRef.current(pid),
+          onBranchWithPrompt: (pid: string, prompt2: string) => branchFromWithPromptRef.current(pid, prompt2),
+          onDelete: (pid: string) => deleteNodeRef.current(pid),
+          onQuickGenerate: (pid: string) => quickGenerateRef.current(pid),
+        },
+      };
       return cleared.concat({ ...newNode, selected: true });
     });
     setEdges((es) => es.concat({ id: crypto.randomUUID(), source: parentId, target: id }));
     setCurrentPageId(id);
-    await generateChildFromParent(id, parent, prompt);
-  }
+    await generateChildFromParentRef.current(id, parent, prompt);
+  }, [pages, nodes]);
+  useEffect(() => { branchFromWithPromptRef.current = branchFromWithPrompt; }, [branchFromWithPrompt]);
 
-  async function quickGenerate(pageId: string) {
+  const quickGenerate = useCallback(async (pageId: string) => {
     const page = pages.find((p) => p.id === pageId);
     if (!page) return;
     const now = Date.now();
@@ -413,8 +445,9 @@ export default function Editor() {
     lastQuickGenAtRef.current = now;
     const prompt = (page.prompt || "").trim();
     if (!prompt) { setBranchingParentId(pageId); setBranchPrompt(""); return; }
-    await branchFromWithPrompt(pageId, prompt);
-  }
+    await branchFromWithPromptRef.current(pageId, prompt);
+  }, [pages]);
+  useEffect(() => { quickGenerateRef.current = quickGenerate; }, [quickGenerate]);
 
   async function blobUrlToPngBase64(url: string): Promise<string> {
     // draw to canvas -> PNG dataURL -> strip prefix
@@ -432,6 +465,39 @@ export default function Editor() {
     ctx.drawImage(img, 0, 0, w, h);
     const dataUrl = c.toDataURL('image/png');
     return dataUrl.replace(/^data:image\/png;base64,/, '');
+  }
+
+  
+
+  function buildInstructionPrompt(page: Page, userPrompt: string): string {
+    const sys = (page.systemPrompt || '').trim();
+    const user = (userPrompt || '').trim();
+    return [sys, user].filter(Boolean).join(' ');
+  }
+
+  async function generateInto(pageId: string, prompt: string, pageOverride?: Page) {
+    try {
+      setGenerating(true);
+      const page = pageOverride ?? pages.find(p => p.id === pageId)!;
+      setPagePatch(pageId, { generating: true, status: 'Generating…' });
+      const instruction = buildInstructionPrompt(page, prompt);
+      const { generateColoringBookImage } = await import("@/lib/nanoBanana");
+      const rawUrl = await generateColoringBookImage(instruction);
+      const fitted = await fitImageToPrintableArea(rawUrl, page);
+      const prev = pages.find((p) => p.id === pageId);
+      if (prev) {
+        try {
+          if (prev.originalImageUrl && prev.originalImageUrl.startsWith('blob:') && prev.originalImageUrl !== rawUrl) URL.revokeObjectURL(prev.originalImageUrl);
+          if (prev.imageUrl && prev.imageUrl.startsWith('blob:') && prev.imageUrl !== rawUrl) URL.revokeObjectURL(prev.imageUrl);
+        } catch { }
+      }
+      setPagePatch(pageId, { imageUrl: fitted, originalImageUrl: fitted, generating: false, status: '' });
+    } catch (err) {
+      pushToast((err as Error).message || 'Failed to generate image', 'error');
+      setPagePatch(pageId, { generating: false, status: '' });
+    } finally {
+      setGenerating(false);
+    }
   }
 
   async function generateChildFromParent(childId: string, parent: Page, prompt: string) {
@@ -460,42 +526,11 @@ export default function Editor() {
     setPagePatch(childId, { generating: true, status: 'Generating…' });
     await generateInto(childId, prompt, childDraft);
   }
+  useEffect(() => { generateChildFromParentRef.current = generateChildFromParent; });
 
-  function buildInstructionPrompt(page: Page, userPrompt: string): string {
-    const sys = (page.systemPrompt || '').trim();
-    const user = (userPrompt || '').trim();
-    return [sys, user].filter(Boolean).join(' ');
-  }
+  
 
-  async function generateInto(pageId: string, prompt: string, pageOverride?: Page) {
-    try {
-      setGenerating(true);
-      const page = pageOverride ?? pages.find(p => p.id === pageId)!;
-      setPagePatch(pageId, { generating: true, status: 'Generating…' });
-      const instruction = buildInstructionPrompt(page, prompt);
-      const { generateColoringBookImage } = await import("@/lib/nanoBanana");
-      const rawUrl = await generateColoringBookImage(instruction);
-      const fitted = await fitImageToPrintableArea(rawUrl, page);
-      // Revoke previous object URLs to avoid leaks
-      const prev = pages.find((p) => p.id === pageId);
-      if (prev) {
-        try {
-          if (prev.originalImageUrl && prev.originalImageUrl.startsWith('blob:') && prev.originalImageUrl !== rawUrl) URL.revokeObjectURL(prev.originalImageUrl);
-          if (prev.imageUrl && prev.imageUrl.startsWith('blob:') && prev.imageUrl !== rawUrl) URL.revokeObjectURL(prev.imageUrl);
-        } catch { }
-      }
-      setPagePatch(pageId, { imageUrl: fitted, originalImageUrl: fitted, generating: false, status: '' });
-    } catch (err) {
-      pushToast((err as Error).message || 'Failed to generate image', 'error');
-      setPagePatch(pageId, { generating: false, status: '' });
-    } finally {
-      setGenerating(false);
-    }
-  }
-
-  // Inpainting disabled for now
-
-  function deleteNode(pageId: string) {
+  const deleteNode = useCallback((pageId: string) => {
     if (!confirm("Delete this node?")) return;
     // Find parents and children
     const incoming = edges.filter((e) => e.target === pageId);
@@ -514,7 +549,37 @@ export default function Editor() {
     setPages((ps) => ps.filter((p) => p.id !== pageId));
     setNodes((ns) => ns.filter((n) => n.id !== pageId));
     if (currentPageId === pageId) setCurrentPageId(parentId!);
-  }
+  }, [edges, pages, currentPageId]);
+  useEffect(() => { deleteNodeRef.current = deleteNode; }, [deleteNode]);
+
+  // Keep node list in sync with page list (preserve selection)
+  useEffect(() => {
+    setNodes((old) =>
+      pages.map((p, i) => {
+        const existing = old.find((n) => n.id === p.id);
+        const pos = existing?.position || { x: (i % 3) * 380, y: Math.floor(i / 3) * 480 };
+        const node: PageRFNode = {
+          id: p.id,
+          type: 'page',
+          position: pos,
+          data: {
+            id: p.id,
+            title: p.title,
+            orientation: p.orientation,
+            marginInches: p.marginInches,
+            imageUrl: p.imageUrl,
+            loading: !!p.generating,
+            loadingText: p.status,
+            onBranch: (pid: string) => branchFromRef.current(pid),
+            onBranchWithPrompt: (pid: string, prompt: string) => branchFromWithPromptRef.current(pid, prompt),
+            onDelete: (pid: string) => deleteNodeRef.current(pid),
+            onQuickGenerate: (pid: string) => quickGenerateRef.current(pid),
+          },
+        };
+        return { ...node, selected: existing?.selected ?? (p.id === currentPageId) };
+      })
+    );
+  }, [pages, currentPageId]);
 
   // Drop & paste handlers (create nodes)
   const flowRef = useRef<HTMLDivElement | null>(null);
@@ -523,7 +588,7 @@ export default function Editor() {
     if (!el) return;
     const onDragOver = (e: DragEvent) => {
       e.preventDefault();
-      e.dataTransfer && (e.dataTransfer.dropEffect = "copy");
+      if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
     };
     const onDrop = async (e: DragEvent) => {
       e.preventDefault();
@@ -545,7 +610,7 @@ export default function Editor() {
             const url = URL.createObjectURL(blob);
             addPageFromImage(url, "Dropped URL image");
           }
-        } catch (err) {
+        } catch {
           pushToast('Failed to fetch dropped URL', 'error');
         }
       }
@@ -556,7 +621,7 @@ export default function Editor() {
       el.removeEventListener("dragover", onDragOver);
       el.removeEventListener("drop", onDrop);
     };
-  }, [flowRef.current]);
+  }, [addPageFromImage]);
 
   useEffect(() => {
     const onPaste = async (e: ClipboardEvent) => {
@@ -580,7 +645,7 @@ export default function Editor() {
             const url = URL.createObjectURL(blob);
             addPageFromImage(url, "Pasted URL image");
           }
-        } catch (err) {
+        } catch {
           pushToast('Failed to fetch pasted URL', 'error');
         }
       }
@@ -607,105 +672,14 @@ export default function Editor() {
         }
         return;
       }
-      // Inpainting disabled
     };
     window.addEventListener('keydown', onKeyDown);
     return () => { window.removeEventListener("paste", onPaste); window.removeEventListener('keydown', onKeyDown); };
-  }, []);
+  }, [addPageFromImage, nodes, currentPageId, deleteNode, deleteNodes, quickGenerate]);
 
   // Simple BW threshold processing (apply to current page using originalImageUrl)
-  async function applyThreshold(pageId: string, threshold: number) {
-    const page = pages.find((p) => p.id === pageId);
-    if (!page || !page.originalImageUrl) return;
-    const img = new Image();
-    img.crossOrigin = "anonymous";
-    const src = page.originalImageUrl;
-    await new Promise<void>((res, rej) => {
-      img.onload = () => res();
-      img.onerror = () => rej(new Error("Failed to load image"));
-      img.src = src;
-    });
-    const maxW = 1024;
-    const scale = Math.min(1, maxW / img.width);
-    const w = Math.max(1, Math.round(img.width * scale));
-    const h = Math.max(1, Math.round(img.height * scale));
-    const canvas = document.createElement("canvas");
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    ctx.drawImage(img, 0, 0, w, h);
-    const imageData = ctx.getImageData(0, 0, w, h);
-    const d = imageData.data;
-    for (let i = 0; i < d.length; i += 4) {
-      const r = d[i], g = d[i + 1], b = d[i + 2];
-      const y = 0.2126 * r + 0.7152 * g + 0.0722 * b; // luminance
-      const v = y >= threshold ? 255 : 0;
-      d[i] = d[i + 1] = d[i + 2] = v;
-      d[i + 3] = 255;
-    }
-    ctx.putImageData(imageData, 0, 0);
-    const url = canvas.toDataURL("image/png");
-    // revoke previous processed URL if it was an object URL
-    try {
-      if (page.imageUrl && page.imageUrl.startsWith('blob:')) URL.revokeObjectURL(page.imageUrl);
-    } catch { }
-    setPagePatch(pageId, { imageUrl: url, bwThreshold: threshold });
-  }
 
   // Export to PDF (letter)
-  async function exportCurrentPageToPdf(page: Page) {
-    if (!page.imageUrl) {
-      alert("No image to export");
-      return;
-    }
-    const pdf = new jsPDF({ orientation: page.orientation, unit: "in", format: "letter" });
-    const pageW = page.orientation === "portrait" ? 8.5 : 11;
-    const pageH = page.orientation === "portrait" ? 11 : 8.5;
-    const m = page.marginInches;
-    const imgW = pageW - 2 * m;
-    const imgH = pageH - 2 * m;
-    try {
-      // Ensure we provide a dataURL that jsPDF can consume
-      const img = new Image();
-      img.crossOrigin = "anonymous";
-      await new Promise<void>((res, rej) => {
-        img.onload = () => res();
-        img.onerror = () => rej(new Error("Failed to load image for export"));
-        img.src = page.imageUrl as string;
-      });
-      const canvas = document.createElement("canvas");
-      const dpr = 2;
-      // Convert inches to px at 96DPI then scale by dpr
-      const pxW = Math.round(imgW * 96);
-      const pxH = Math.round(imgH * 96);
-      canvas.width = pxW * dpr;
-      canvas.height = pxH * dpr;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) throw new Error("No canvas context");
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      // Fit image contain inside target rect
-      const scale = Math.min(pxW / img.width, pxH / img.height);
-      const dw = Math.round(img.width * scale);
-      const dh = Math.round(img.height * scale);
-      const dx = Math.floor((pxW - dw) / 2);
-      const dy = Math.floor((pxH - dh) / 2);
-      ctx.fillStyle = "#ffffff";
-      ctx.fillRect(0, 0, pxW, pxH);
-      ctx.drawImage(img, dx, dy, dw, dh);
-      const dataUrl = canvas.toDataURL("image/png");
-      pdf.addImage(dataUrl, "PNG", m, m, imgW, imgH, undefined, "FAST");
-      // Footer: standards (if any)
-      const codes = (page.standards || []).join(', ');
-      if (codes) {
-        pdf.setFontSize(8);
-        pdf.text(`Standards: ${codes}`, m, pageH - 0.3);
-      }
-      pdf.save("checkfu.pdf");
-    } catch (err) {
-      alert("Failed to add image to PDF");
-    }
-  }
 
   async function exportPagesToPdf(pagesToExport: Page[]) {
     if (!pagesToExport.length) return;
@@ -738,7 +712,7 @@ export default function Editor() {
         pdf.addImage(dataUrl, 'PNG', m, m, imgW, imgH, undefined, 'FAST');
         const codes = (page.standards || []).join(', ');
         if (codes) { pdf.setFontSize(8); pdf.text(`Standards: ${codes}`, m, pageH - 0.3); }
-      } catch (e) { /* skip page on error */ }
+      } catch { /* skip page on error */ }
     }
     pdf.save('checkfu.pdf');
   }
@@ -910,7 +884,7 @@ export default function Editor() {
                   {(currentPage?.pageType || 'worksheet') === 'coloring' ? (
                     <div className="grid gap-1">
                       <label htmlFor="coloring-style">Style</label>
-                      <select id="coloring-style" className="border rounded px-2 py-1" value={currentPage?.coloringStyle || 'classic'} onChange={(e) => setPagePatch(currentPageId!, { coloringStyle: e.target.value as any })}>
+                      <select id="coloring-style" className="border rounded px-2 py-1" value={currentPage?.coloringStyle || 'classic'} onChange={(e) => setPagePatch(currentPageId!, { coloringStyle: e.target.value as Page['coloringStyle'] })}>
                         <option value="classic">Classic</option>
                         <option value="anime">Anime</option>
                         <option value="retro">Retro</option>
@@ -1015,9 +989,6 @@ export default function Editor() {
           <div key={t.id} className={`px-3 py-2 rounded shadow text-sm ${t.kind === 'error' ? 'bg-red-600 text-white' : t.kind === 'success' ? 'bg-green-600 text-white' : 'bg-slate-800 text-white'}`}>{t.text}</div>
         ))}
       </div>
-
-      {/* Inpainting disabled */}
-
       {/* Settings modal */}
       {branchingParentId && (
         <div role="dialog" aria-modal className="fixed inset-0 bg-black/40 grid place-items-center">
@@ -1085,9 +1056,9 @@ function StandardsMultiSelect({
       }
     };
     onRebuild();
-    sel.addEventListener('rebuild', onRebuild as any);
-    return () => sel.removeEventListener('rebuild', onRebuild as any);
-  }, [options, value]);
+    sel.addEventListener('rebuild', onRebuild as EventListener);
+    return () => sel.removeEventListener('rebuild', onRebuild as EventListener);
+  }, [options, value, selectRef]);
 
   return (
     <select

@@ -22,17 +22,31 @@ function getClient() {
   return new GenAI({ apiKey });
 }
 
-async function generateContent(client: any, payload: { model: string; contents: any[] }) {
+type InlineDataPart = { inlineData: { mimeType: string; data: string } };
+type TextPart = { text: string };
+type Part = InlineDataPart | TextPart;
+type GenerateRequest = { model: string; contents: Part[] };
+type GenerateResponse = {
+  candidates?: Array<{ content?: { parts?: Part[] } }>;
+  response?: { candidates?: Array<{ content?: { parts?: Part[] } }> };
+};
+
+type GenAIClient = {
+  models?: { generateContent: (req: GenerateRequest) => Promise<GenerateResponse> };
+  generateContent?: (req: GenerateRequest) => Promise<GenerateResponse>;
+};
+
+async function generateContent(client: GenAIClient, payload: GenerateRequest): Promise<GenerateResponse | null> {
   if (client?.models?.generateContent) return client.models.generateContent(payload);
   if (client?.generateContent) return client.generateContent(payload);
   return null;
 }
 
-async function generateImageObjectUrl(contents: any[]): Promise<string> {
+async function generateImageObjectUrl(contents: Part[]): Promise<string> {
   const client = getClient();
-  const res: any = await generateContent(client, { model: MODEL_ID, contents });
+  const res = await generateContent(client, { model: MODEL_ID, contents });
   const parts = res?.candidates?.[0]?.content?.parts || res?.response?.candidates?.[0]?.content?.parts;
-  const part = parts?.find((p: any) => p.inlineData);
+  const part = parts?.find((p) => (p as InlineDataPart).inlineData) as InlineDataPart | undefined;
   const b64 = part?.inlineData?.data as string | undefined;
   if (!b64) throw new Error('No image in response');
   const blob = await (await fetch(`data:image/png;base64,${b64}`)).blob();
@@ -40,12 +54,12 @@ async function generateImageObjectUrl(contents: any[]): Promise<string> {
 }
 
 export async function generateColoringBookImage(prompt: string): Promise<string> {
-  const contents = [{ text: `${prompt} ${STYLE_BLOCK}` }];
+  const contents: Part[] = [{ text: `${prompt} ${STYLE_BLOCK}` }];
   return generateImageObjectUrl(contents);
 }
 
 export async function transformImageWithPrompt(basePngB64: string, instruction: string): Promise<string> {
-  const contents = [
+  const contents: Part[] = [
     { text: `${instruction} ${STYLE_BLOCK}` },
     { inlineData: { mimeType: 'image/png', data: basePngB64 } },
   ];
@@ -53,7 +67,7 @@ export async function transformImageWithPrompt(basePngB64: string, instruction: 
 }
 
 export async function editImageWithMaskGuidance(basePngB64: string, maskPngB64: string, instruction: string): Promise<string> {
-  const contents = [
+  const contents: Part[] = [
     { text: `${instruction} Edit strictly inside the white region in the next mask image. Keep composition style and aspect ratio the same. Do not alter pixels where the mask is black.` },
     { inlineData: { mimeType: 'image/png', data: basePngB64 } },
     { inlineData: { mimeType: 'image/png', data: maskPngB64 } },

@@ -6,6 +6,7 @@
 // - Non-interactive: this is a WYSIWYG preview for printing/export
 
 import { useMemo } from "react";
+import Image from "next/image";
 
 type Orientation = "portrait" | "landscape";
 
@@ -40,7 +41,7 @@ export default function PagePreview({
 
       {/* Inner margin area */}
       <div
-        className="absolute overflow-hidden"
+        className="absolute overflow-hidden relative"
         style={{
           left: m + 1,
           top: m + 1,
@@ -49,12 +50,13 @@ export default function PagePreview({
         }}
       >
         {imageUrl ? (
-          // Use object-fit contain to keep aspect and fit inside margins
-          <img
+          <Image
             src={imageUrl}
             alt="Page image"
-            className="w-full h-full object-contain pointer-events-none select-none"
-            crossOrigin="anonymous"
+            fill
+            sizes="100vw"
+            style={{ objectFit: 'contain' }}
+            priority
           />
         ) : (
           <div className="w-full h-full grid place-items-center text-slate-400 text-xs">

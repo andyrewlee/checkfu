@@ -1,0 +1,2 @@
+echo "Running lint + typecheck before commit..."
+npm run -s lint && npm run -s typecheck

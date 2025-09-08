@@ -1,0 +1,2 @@
+echo "Running Next build before push..."
+npm run -s build
