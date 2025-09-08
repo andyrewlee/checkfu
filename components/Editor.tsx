@@ -9,7 +9,7 @@
  * - Inspector manages Page Type, Standards, Style, System Prompt, and Prompt
  */
 
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import {
   ReactFlow,
   Background,
@@ -33,7 +33,6 @@ import PageNode, { type PageNodeData } from "@/components/nodes/PageNode";
  */
 
 type Orientation = "portrait" | "landscape";
-// Left sidebar is always Pages now (no tabs)
 
 type Page = {
   id: string;
@@ -67,8 +66,6 @@ const getLetterSizeIn = (o: Orientation) =>
   o === "portrait" ? { w: 8.5, h: 11 } : { w: 11, h: 8.5 };
 
 export const nodeTypes: NodeTypes = { page: PageNode };
-
-//
 
 function revokeIfBlob(url?: string) {
   try {
@@ -368,16 +365,14 @@ function getEffectiveSystemPrompt(
 /**
  * Hooks — event-safe callbacks and DOM listeners
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function useEvent<T extends (...args: any[]) => any>(fn: T): T {
+function useEvent<TArgs extends unknown[], TReturn>(
+  fn: (...args: TArgs) => TReturn,
+): (...args: TArgs) => TReturn {
   const ref = useRef(fn);
   useEffect(() => {
     ref.current = fn;
   }, [fn]);
-  return useCallback(
-    ((...args: Parameters<T>) => (ref.current as T)(...args)) as T,
-    [],
-  );
+  return useCallback((...args: TArgs) => ref.current(...args), []);
 }
 
 function useAutoScrollIntoView(id: string | null) {
@@ -561,10 +556,18 @@ async function addPageToJsPdf(pdf: jsPDF, page: Page) {
  */
 
 export default function Editor() {
-  const [pages, setPages] = useState<Page[]>(() => []);
+  type PagesIndex = { byId: Record<string, Page>; order: string[] };
+  const [pagesIndex, setPagesIndex] = useState<PagesIndex>({
+    byId: {},
+    order: [],
+  });
+  const pages = useMemo(
+    () => pagesIndex.order.map((id) => pagesIndex.byId[id]).filter(Boolean),
+    [pagesIndex],
+  );
   const [currentPageId, setCurrentPageId] = useState<string | null>(null);
   const currentPage = currentPageId
-    ? (pages.find((p) => p.id === currentPageId) ?? null)
+    ? (pagesIndex.byId[currentPageId] ?? null)
     : null;
   type PageRFNode = RFNode<PageNodeData, "page">;
   const [nodes, setNodes, onNodesChange] = useNodesState<PageRFNode>([]);
@@ -594,6 +597,12 @@ export default function Editor() {
   const lastQuickGenAtRef = useRef<number>(0);
   const generatingAny = pages.some((p) => p.generating);
   const needsApiKey = useGeminiApiKeyNeeded();
+  // Prefetch generation library once an API key exists to reduce first-generate latency
+  useEffect(() => {
+    if (!needsApiKey) {
+      void import("@/lib/nanoBanana");
+    }
+  }, [needsApiKey]);
   // Stable handler refs to avoid dependency cycles in callbacks/effects
   const branchFromRef = useRef<(id: string) => void>(() => {});
   const branchFromWithPromptRef = useRef<
@@ -630,12 +639,14 @@ export default function Editor() {
     );
     onNodesChange(changes);
     if (removedIds.size) {
-      setPages((ps) => {
-        const filtered = ps.filter((p) => !removedIds.has(p.id));
+      setPagesIndex((s) => {
+        const byId = { ...s.byId } as Record<string, Page>;
+        for (const id of removedIds) delete byId[id];
+        const order = s.order.filter((id) => !removedIds.has(id));
         setCurrentPageId((prev) =>
-          prev && removedIds.has(prev) ? (filtered[0]?.id ?? null) : prev,
+          prev && removedIds.has(prev) ? (order[0] ?? null) : prev,
         );
-        return filtered;
+        return { byId, order };
       });
       setEdges((es) =>
         es.filter(
@@ -651,25 +662,32 @@ export default function Editor() {
       setEdges((es) =>
         es.filter((e) => !ids.includes(e.source) && !ids.includes(e.target)),
       );
-      setPages((ps) => ps.filter((p) => !ids.includes(p.id)));
+      setPagesIndex((s) => {
+        const byId = { ...s.byId } as Record<string, Page>;
+        for (const id of ids) delete byId[id];
+        const order = s.order.filter((id) => !ids.includes(id));
+        setCurrentPageId((prev) =>
+          prev && ids.includes(prev) ? (order[0] ?? null) : prev,
+        );
+        return { byId, order };
+      });
       setNodes((ns) => ns.filter((n) => !ids.includes(n.id)));
-      setCurrentPageId((prev) =>
-        prev && ids.includes(prev)
-          ? (pages.find((p) => !ids.includes(p.id))?.id ?? null)
-          : prev,
-      );
     },
-    [pages, setEdges, setNodes],
+    [setEdges, setNodes],
   );
 
   function setPagePatch(id: string, patch: Partial<Page>) {
-    setPages((ps) => ps.map((p) => (p.id === id ? { ...p, ...patch } : p)));
+    setPagesIndex((s) => {
+      const prev = s.byId[id];
+      if (!prev) return s;
+      return { ...s, byId: { ...s.byId, [id]: { ...prev, ...patch } } };
+    });
   }
 
   // Convert image to 1‑bit black/white at a given threshold
   const applyThreshold = useCallback(
     async (pageId: string, threshold: number) => {
-      const page = pages.find((p) => p.id === pageId);
+      const page = pagesIndex.byId[pageId];
       if (!page || !page.originalImageUrl) return;
       try {
         const url = await thresholdToDataUrl(page.originalImageUrl, threshold);
@@ -679,7 +697,7 @@ export default function Editor() {
         /* ignore */
       }
     },
-    [pages],
+    [pagesIndex],
   );
 
   // System prompt is derived on read via getEffectiveSystemPrompt (no Effect)
@@ -702,10 +720,13 @@ export default function Editor() {
         systemPromptEdited: false,
         ...overrides,
       };
-      setPages((ps) => ps.concat(newPage));
+      setPagesIndex((s) => ({
+        byId: { ...s.byId, [id]: newPage },
+        order: s.order.concat(id),
+      }));
       setCurrentPageId(id);
       // apply default threshold
-      void applyThreshold(id, newPage.bwThreshold || 200);
+      void applyThreshold(id, newPage.bwThreshold || DEFAULT_THRESHOLD);
       return id;
     },
     [applyThreshold],
@@ -719,12 +740,12 @@ export default function Editor() {
 
   const branchFrom = useCallback(
     (parentId: string) => {
-      const parent = pages.find((p) => p.id === parentId);
+      const parent = pagesIndex.byId[parentId];
       if (!parent) return;
       setBranchingParentId(parentId);
       setBranchPrompt(parent.prompt || "");
     },
-    [pages],
+    [pagesIndex],
   );
   useEffect(() => {
     branchFromRef.current = branchFrom;
@@ -732,7 +753,7 @@ export default function Editor() {
 
   const branchFromWithPrompt = useCallback(
     async (parentId: string, prompt: string) => {
-      const parent = pages.find((p) => p.id === parentId);
+      const parent = pagesIndex.byId[parentId];
       if (!parent) return;
       const id = crypto.randomUUID();
       const child: Page = {
@@ -747,7 +768,10 @@ export default function Editor() {
       const newPos = parentNode
         ? { x: parentNode.position.x, y: parentNode.position.y + 480 }
         : { x: 0, y: 480 };
-      setPages((ps) => ps.concat(child));
+      setPagesIndex((s) => ({
+        byId: { ...s.byId, [id]: child },
+        order: s.order.concat(id),
+      }));
       setNodes((ns) => {
         // unselect all existing nodes and add the new one as selected
         const cleared = ns.map((n) => ({ ...n, selected: false }));
@@ -778,7 +802,7 @@ export default function Editor() {
       setCurrentPageId(id);
       await generateChildFromParentRef.current(id, parent, prompt);
     },
-    [pages, nodes, setNodes, setEdges],
+    [pagesIndex, nodes, setNodes, setEdges],
   );
   useEffect(() => {
     branchFromWithPromptRef.current = branchFromWithPrompt;
@@ -786,7 +810,7 @@ export default function Editor() {
 
   const quickGenerate = useCallback(
     async (pageId: string) => {
-      const page = pages.find((p) => p.id === pageId);
+      const page = pagesIndex.byId[pageId];
       if (!page) return;
       const now = Date.now();
       if (now - lastQuickGenAtRef.current < 1200) {
@@ -801,7 +825,7 @@ export default function Editor() {
       }
       await branchFromWithPromptRef.current(pageId, prompt);
     },
-    [pages],
+    [pagesIndex],
   );
   useEffect(() => {
     quickGenerateRef.current = quickGenerate;
@@ -819,13 +843,13 @@ export default function Editor() {
   const generateInto = useCallback(
     async (pageId: string, prompt: string, pageOverride?: Page) => {
       try {
-        const page = pageOverride ?? pages.find((p) => p.id === pageId)!;
+        const page = pageOverride ?? pagesIndex.byId[pageId]!;
         setPagePatch(pageId, { generating: true, status: "Generating…" });
         const instruction = buildInstruction(page, prompt);
         const { generateColoringBookImage } = await import("@/lib/nanoBanana");
         const rawUrl = await generateColoringBookImage(instruction);
         const fitted = await fitImageToPrintableArea(rawUrl, page);
-        const prev = pages.find((p) => p.id === pageId);
+        const prev = pagesIndex.byId[pageId];
         if (prev) {
           revokeIfBlob(prev.originalImageUrl); // avoid leaks from stale object URLs
           revokeIfBlob(prev.imageUrl); // avoid leaks from stale object URLs
@@ -844,7 +868,7 @@ export default function Editor() {
         setPagePatch(pageId, { generating: false, status: "" });
       }
     },
-    [pages, buildInstruction],
+    [pagesIndex, buildInstruction],
   );
 
   const generateChildFromParent = useCallback(
@@ -861,7 +885,7 @@ export default function Editor() {
           const { transformImageWithPrompt } = await import("@/lib/nanoBanana");
           const rawUrl = await transformImageWithPrompt(baseB64, instruction);
           const fitted = await fitImageToPrintableArea(rawUrl, childDraft);
-          const prev = pages.find((p) => p.id === childId);
+          const prev = pagesIndex.byId[childId];
           revokeIfBlob(prev?.originalImageUrl); // avoid leaks from stale object URLs
           revokeIfBlob(prev?.imageUrl); // avoid leaks from stale object URLs
           setPagePatch(childId, {
@@ -879,7 +903,7 @@ export default function Editor() {
       setPagePatch(childId, { generating: true, status: "Generating…" });
       await generateInto(childId, prompt, childDraft);
     },
-    [pages, buildInstruction, generateInto],
+    [pagesIndex, buildInstruction, generateInto],
   );
   useEffect(() => {
     generateChildFromParentRef.current = generateChildFromParent;
@@ -891,7 +915,7 @@ export default function Editor() {
       // Find parents and children
       const incoming = edges.filter((e) => e.target === pageId);
       const outgoing = edges.filter((e) => e.source === pageId);
-      const parentId = incoming[0]?.source || pages[0]?.id; // reattach to first parent, otherwise root
+      const parentId = incoming[0]?.source || pagesIndex.order[0]; // reattach to first parent, otherwise root
       const newEdges: Edge[] = edges
         .filter((e) => e.source !== pageId && e.target !== pageId) // remove edges touching deleted
         .concat(
@@ -902,11 +926,16 @@ export default function Editor() {
           })),
         );
       setEdges(newEdges);
-      setPages((ps) => ps.filter((p) => p.id !== pageId));
+      setPagesIndex((s) => {
+        const byId = { ...s.byId } as Record<string, Page>;
+        delete byId[pageId];
+        const order = s.order.filter((id) => id !== pageId);
+        return { byId, order };
+      });
       setNodes((ns) => ns.filter((n) => n.id !== pageId));
       if (currentPageId === pageId) setCurrentPageId(parentId!);
     },
-    [edges, pages, currentPageId, setEdges, setNodes],
+    [edges, pagesIndex, currentPageId, setEdges, setNodes],
   );
   useEffect(() => {
     deleteNodeRef.current = deleteNode;
@@ -1015,7 +1044,7 @@ export default function Editor() {
             onClick={() => {
               const selected = nodes
                 .filter((n) => n.selected)
-                .map((n) => pages.find((p) => p.id === n.id)!)
+                .map((n) => pagesIndex.byId[n.id])
                 .filter(Boolean) as Page[];
               const toExport = selected.length
                 ? selected
@@ -1095,7 +1124,10 @@ export default function Editor() {
                   systemPrompt: "",
                   systemPromptEdited: false,
                 };
-                setPages((ps) => ps.concat(p));
+                setPagesIndex((s) => ({
+                  byId: { ...s.byId, [id]: p },
+                  order: s.order.concat(id),
+                }));
                 setCurrentPageId(id);
               }}
             >
@@ -1468,7 +1500,9 @@ export default function Editor() {
                         return;
                       }
                       const url = URL.createObjectURL(f);
-                      const prev = pages.find((p) => p.id === currentPageId!);
+                      const prev = currentPageId
+                        ? pagesIndex.byId[currentPageId]
+                        : undefined;
                       revokeIfBlob(prev?.originalImageUrl); // avoid leaks from stale object URLs
                       revokeIfBlob(prev?.imageUrl); // avoid leaks from stale object URLs
                       setPagePatch(currentPageId!, {
@@ -1477,8 +1511,9 @@ export default function Editor() {
                       });
                       void applyThreshold(
                         currentPageId!,
-                        pages.find((p) => p.id === currentPageId!)
-                          ?.bwThreshold ?? DEFAULT_THRESHOLD,
+                        (currentPageId
+                          ? pagesIndex.byId[currentPageId]?.bwThreshold
+                          : undefined) ?? DEFAULT_THRESHOLD,
                       );
                     }}
                   />
