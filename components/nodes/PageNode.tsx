@@ -1,41 +1,54 @@
 "use client";
+/* eslint-disable @typescript-eslint/no-explicit-any */
 
 /**
  * PageNode
- * React Flow node that renders a single printable page with a preview and branching toolbar.
+ * React Flow node that renders a single printable page with a Fabric canvas and branching toolbar.
  */
 
 import { memo, useMemo, useState } from "react";
 import type { Node as RFNode, NodeProps } from "@xyflow/react";
 import { Handle, Position, NodeToolbar } from "@xyflow/react";
-import PagePreview from "@/components/PagePreview";
+import PageCanvasFabric from "@/components/PageCanvasFabric";
+import { usePageById, useActions } from "@/store/useEditorStore";
 
 const DPI = 96;
 
-export type PageNodeData = {
-  id: string;
-  title: string;
-  orientation: "portrait" | "landscape";
-  marginInches: number;
-  onBranch: (pageId: string) => void;
-  onBranchWithPrompt?: (pageId: string, prompt: string) => void;
-  onDelete?: (pageId: string) => void;
-  onQuickGenerate?: (pageId: string) => void;
-  imageUrl?: string;
-  onSetImageUrl?: (pageId: string, url: string) => void;
-  loading?: boolean;
-  loadingText?: string;
-};
+export type PageNodeData =
+  | { pageId: string } // store-driven mode
+  | ({
+      id: string;
+      title: string;
+      orientation: "portrait" | "landscape";
+      onBranch: (pageId: string) => void;
+      onBranchWithPrompt?: (pageId: string, prompt: string) => void;
+      onDelete?: (pageId: string) => void;
+      onQuickGenerate?: (pageId: string) => void;
+      imageUrl?: string;
+      children: any[];
+      onChildrenChange: (pageId: string, next: any[]) => void;
+      onSelectChild: (pageId: string, childId: string | null) => void;
+      onSetImageUrl?: (pageId: string, url: string) => void;
+      loading?: boolean;
+      loadingText?: string;
+    } & Record<string, unknown>);
 
-type PageRFNode = RFNode<PageNodeData, 'page'>;
+type PageRFNode = RFNode<PageNodeData, "page">;
 
 function PageNode({ data, selected }: NodeProps<PageRFNode>) {
+  const maybePageId = (data as any).pageId as string | undefined;
+  const storeMode = !!maybePageId;
+  const page = usePageById(maybePageId);
+  const { selectChild, replaceChildren, setCurrentPage } = useActions();
   const [prompt, setPrompt] = useState("");
+  const orientation = storeMode
+    ? (page?.orientation ?? "portrait")
+    : (data as any).orientation;
   const dims = useMemo(() => {
-    const wIn = data.orientation === "portrait" ? 8.5 : 11;
-    const hIn = data.orientation === "portrait" ? 11 : 8.5;
+    const wIn = orientation === "portrait" ? 8.5 : 11;
+    const hIn = orientation === "portrait" ? 11 : 8.5;
     return { w: Math.round(wIn * DPI), h: Math.round(hIn * DPI) };
-  }, [data.orientation]);
+  }, [orientation]);
 
   return (
     <div
@@ -45,74 +58,129 @@ function PageNode({ data, selected }: NodeProps<PageRFNode>) {
       style={{ width: dims.w + 16, padding: 8 }}
     >
       {/* Handles for connecting/branching (top target centered, bottom source centered). */}
-      <Handle type="target" position={Position.Top} style={{ background: "#94a3b8", left: "50%", transform: "translate(-50%, 0)" }} />
-      <Handle type="source" position={Position.Bottom} style={{ background: "#94a3b8", left: "50%", transform: "translate(-50%, 0)" }} />
+      <Handle
+        type="target"
+        position={Position.Top}
+        style={{
+          background: "#94a3b8",
+          left: "50%",
+          transform: "translate(-50%, 0)",
+        }}
+      />
+      <Handle
+        type="source"
+        position={Position.Bottom}
+        style={{
+          background: "#94a3b8",
+          left: "50%",
+          transform: "translate(-50%, 0)",
+        }}
+      />
 
       <div
-        className="flex items-center justify-between mb-2 select-none"
+        className="flex items-center justify-between mb-2 select-none dragHandlePage"
         onClick={(e) => {
           if (e.metaKey || e.ctrlKey) {
             e.preventDefault();
-            data.onQuickGenerate?.(data.id);
+            (data as any).onQuickGenerate?.(
+              storeMode ? (maybePageId ?? "") : (data as any).id,
+            );
           }
         }}
         title="Cmd/Ctrl+Click to quick-generate"
       >
-        <div className="text-xs font-medium truncate" title={data.title}>
-          {data.title}
+        <div
+          className="text-xs font-medium truncate"
+          title={storeMode ? page?.title : (data as any).title}
+        >
+          {storeMode ? page?.title : (data as any).title}
         </div>
-        
       </div>
 
-      {/* Page preview (non-interactive) */}
-      <div className="relative overflow-hidden bg-slate-50 border" style={{ width: dims.w, height: dims.h }}>
-        <PagePreview orientation={data.orientation} marginInches={data.marginInches} imageUrl={data.imageUrl} />
-        {data.loading ? (
+      {/* Page canvas */}
+      <div
+        className="relative overflow-hidden bg-slate-50 border nodrag nopan nowheel"
+        style={{ width: dims.w, height: dims.h }}
+      >
+        <PageCanvasFabric
+          pageId={storeMode ? (maybePageId ?? "") : (data as any).id}
+          orientation={orientation}
+          items={storeMode ? (page?.children ?? []) : (data as any).children}
+          selectedChildId={storeMode ? (page?.selectedChildId ?? null) : null}
+          onChildrenChange={(pid, next) => {
+            if (storeMode) replaceChildren(pid, next);
+            else (data as any).onChildrenChange?.(pid, next);
+          }}
+          onSelectChild={(pid, childId) => {
+            if (storeMode) {
+              // Ensure Inspector targets this page when selecting inside Fabric
+              setCurrentPage(pid);
+              selectChild(pid, childId);
+            } else (data as any).onSelectChild?.(pid, childId);
+          }}
+        />
+        {(storeMode ? page?.generating : (data as any).loading) ? (
           <div className="absolute inset-0 grid place-items-center bg-white/70 pointer-events-none select-none">
             <div className="flex items-center gap-3 px-3 py-2 rounded-md bg-white shadow ring-1 ring-slate-300">
               <div className="h-5 w-5 rounded-full border-2 border-sky-600 border-t-transparent animate-spin" />
               <span className="text-sm font-semibold text-slate-900 tracking-wide">
-                {data.loadingText || 'Generating…'}
+                {(storeMode ? page?.status : (data as any).loadingText) ||
+                  "Generating…"}
               </span>
             </div>
           </div>
         ) : null}
-      </div>
 
-      {/* Branching toolbar */}
-      <NodeToolbar isVisible={selected} position={Position.Bottom} offset={8} className="nodrag nopan nowheel" style={{ pointerEvents: 'all', zIndex: 1000 }}>
-        <div className="flex items-center gap-2 bg-white/95 border rounded shadow-sm px-2 py-1">
-          <input
-            type="text"
-            placeholder="Describe the change…"
-            className="border rounded px-2 py-1 text-xs w-64 nodrag nopan nowheel"
-            value={prompt}
-            onChange={(e) => setPrompt(e.currentTarget.value)}
-            onMouseDown={(e) => e.stopPropagation()}
-            onKeyDown={(e) => {
-              e.stopPropagation();
-              if (e.key === 'Enter') {
-                const p = prompt.trim(); if (!p) return;
-                data.onBranchWithPrompt?.(data.id, p);
+        {/* Portal toolbar (fixed) */}
+        <NodeToolbar
+          isVisible={selected}
+          position={Position.Bottom}
+          offset={8}
+          nodeId={storeMode ? (maybePageId ?? "") : (data as any).id}
+          className="nodrag nopan nowheel will-change-transform"
+          style={{ pointerEvents: "all", zIndex: 1000 }}
+        >
+          <div className="flex items-center gap-2 bg-white/95 border rounded shadow-sm px-2 py-1">
+            <input
+              type="text"
+              placeholder="Describe the change…"
+              className="border rounded px-2 py-1 text-xs w-64 nodrag nopan nowheel"
+              value={prompt}
+              onChange={(e) => setPrompt(e.currentTarget.value)}
+              onMouseDown={(e) => e.stopPropagation()}
+              onKeyDown={(e) => {
+                e.stopPropagation();
+                if (e.key === "Enter") {
+                  const p = prompt.trim();
+                  if (!p) return;
+                  (data as any).onBranchWithPrompt?.(
+                    storeMode ? (maybePageId ?? "") : (data as any).id,
+                    p,
+                  );
+                  setPrompt("");
+                }
+              }}
+            />
+            <button
+              type="button"
+              className="text-xs px-2 py-1 rounded border"
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation();
+                const p = prompt.trim();
+                if (!p) return;
+                (data as any).onBranchWithPrompt?.(
+                  storeMode ? (maybePageId ?? "") : (data as any).id,
+                  p,
+                );
                 setPrompt("");
-              }
-            }}
-          />
-          <button
-            type="button"
-            className="text-xs px-2 py-1 rounded border"
-            onMouseDown={(e) => e.stopPropagation()}
-            onClick={(e) => {
-              e.stopPropagation();
-              const p = prompt.trim(); if (!p) return;
-              data.onBranchWithPrompt?.(data.id, p);
-              setPrompt("");
-            }}
-          >
-            Branch
-          </button>
-        </div>
-      </NodeToolbar>
+              }}
+            >
+              Branch
+            </button>
+          </div>
+        </NodeToolbar>
+      </div>
     </div>
   );
 }
