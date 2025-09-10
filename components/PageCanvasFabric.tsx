@@ -27,6 +27,20 @@ export default function PageCanvasFabric(props: Props) {
   const canvasElRef = useRef<HTMLCanvasElement | null>(null);
   const fabricRef = useRef<any | null>(null);
   const textChangeTimerRef = useRef<number | null>(null);
+  // Hydration fence: suppress commits/selection propagation during programmatic updates
+  const hydratingRef = useRef<number>(0);
+  const isHydrating = () => hydratingRef.current > 0;
+  const withHydration = async <T,>(fn: () => Promise<T> | T): Promise<T> => {
+    hydratingRef.current++;
+    try {
+      return await fn();
+    } finally {
+      hydratingRef.current--;
+    }
+  };
+  // Keep latest items for event handlers (avoid stale closures on undo/redo)
+  const itemsLatestRef = useRef<(TextChild | ImageChild)[]>(items);
+  itemsLatestRef.current = items;
 
   const dims = useMemo(() => {
     const wIn = orientation === "portrait" ? 8.5 : 11;
@@ -35,6 +49,12 @@ export default function PageCanvasFabric(props: Props) {
   }, [orientation]);
 
   // initialize Fabric (guarded for Strict Mode double-invoke)
+  //
+  // Direction of data flow:
+  // - User edits on the canvas → we commit minimal changes back to the store
+  //   via onChildrenChange (see commit()).
+  // - Store changes (items, selectedChildId) → we hydrate Fabric so the canvas
+  //   mirrors the authoritative state. Equality checks avoid redundant writes.
   useEffect(() => {
     if (fabricRef.current) return;
     (async () => {
@@ -62,6 +82,7 @@ export default function PageCanvasFabric(props: Props) {
       // selection events (deduped) and force redraw to keep handles visible
       const lastSelRef = { current: null as string | null };
       const setFromSelection = (e: any) => {
+        if (isHydrating()) return;
         const obj = e?.selected?.[0];
         const id: string | null = obj?.checkfuId || null;
         if (id !== lastSelRef.current) {
@@ -73,6 +94,7 @@ export default function PageCanvasFabric(props: Props) {
       canvas.on("selection:created", setFromSelection);
       canvas.on("selection:updated", setFromSelection);
       canvas.on("selection:cleared", () => {
+        if (isHydrating()) return;
         if (lastSelRef.current !== null) {
           lastSelRef.current = null;
           onSelectChild(pageId, null);
@@ -92,86 +114,123 @@ export default function PageCanvasFabric(props: Props) {
         }
       };
 
-      const isEqualState = (
+      // Robust equality:
+      // - id-based and order-insensitive
+      // - tolerant to tiny float jitter
+      // - ignores derived text width/height (Fabric measures text)
+      const within = (a = 0, b = 0, eps = 0.5) => Math.abs(a - b) <= eps;
+      const same = (
         a: (TextChild | ImageChild)[],
         b: (TextChild | ImageChild)[],
       ) => {
         if (a.length !== b.length) return false;
-        for (let i = 0; i < a.length; i++) {
-          const x = a[i] as any;
-          const y = b[i] as any;
-          if (x.id !== y.id || x.type !== y.type) return false;
-          const keys = [
-            "x",
-            "y",
-            "width",
-            "height",
-            "angle",
-            "visible",
-            "locked",
-          ];
-          for (const k of keys)
-            if ((x as any)[k] !== (y as any)[k]) return false;
+        const map = new Map<string, any>(b.map((c: any) => [c.id, c]));
+        for (const x of a as any[]) {
+          const y = map.get(x.id);
+          if (!y || x.type !== y.type) return false;
+          if (!within(x.x, y.x) || !within(x.y, y.y)) return false;
+          if (!within(x.angle || 0, y.angle || 0)) return false;
+          if (!!x.visible !== !!y.visible) return false;
+          if (!!x.locked !== !!y.locked) return false;
           if (x.type === "text") {
-            const tks = [
-              "text",
-              "fontFamily",
-              "fontSize",
-              "fontWeight",
-              "italic",
-              "align",
-            ];
-            for (const k of tks)
-              if ((x as any)[k] !== (y as any)[k]) return false;
-          } else if (x.type === "image") {
+            if (
+              x.text !== y.text ||
+              x.fontFamily !== y.fontFamily ||
+              x.fontSize !== y.fontSize ||
+              x.fontWeight !== y.fontWeight ||
+              !!x.italic !== !!y.italic ||
+              (x.align || "left") !== (y.align || "left")
+            )
+              return false;
+            // Ignore width/height for text nodes
+          } else {
             if (x.src !== y.src) return false;
+            if (!within(x.width, y.width, 1) || !within(x.height, y.height, 1))
+              return false;
           }
         }
         return true;
       };
 
+      // helper: build a store child from a Fabric object
+      const buildChildFromObj = (obj: any): TextChild | ImageChild => {
+        const round = (n: number | undefined) =>
+          Math.max(0, Math.round(n ?? 0));
+        const base = {
+          id: obj.checkfuId as string,
+          type: obj.checkfuType as "text" | "image",
+          x: round(obj.left),
+          y: round(obj.top),
+          width: round((obj.width || 1) * (obj.scaleX || 1)),
+          height: round((obj.height || 1) * (obj.scaleY || 1)),
+          angle: round(obj.angle || 0),
+          visible: !!obj.visible,
+          locked: !obj.selectable,
+          z: 0,
+        };
+
+        if (obj.checkfuType === "text") {
+          return {
+            ...base,
+            text: obj.text || "",
+            fontFamily: obj.fontFamily || "Inter",
+            fontSize: obj.fontSize || 24,
+            fontWeight: obj.fontWeight || "normal",
+            italic: obj.fontStyle === "italic",
+            align: obj.textAlign || "left",
+          } as TextChild;
+        } else {
+          return {
+            ...base,
+            src: (obj.checkfuSrc as string) ?? undefined,
+            placeholder: !!obj.checkfuPlaceholder,
+            crop: null,
+          } as ImageChild;
+        }
+      };
+
       const commit = () => {
-        // Convert any text scaling into font size and snap to content bounds
+        if (isHydrating()) return;
+        // Convert scaling on text into font size to keep a clean model
         canvas.getObjects().forEach(normalizeTextScaling);
-        const next = canvas.getObjects().map((obj: any) => {
-          const base = {
-            id: obj.checkfuId as string,
-            type: obj.checkfuType as "text" | "image",
-            x: obj.left ?? 0,
-            y: obj.top ?? 0,
-            width: (obj.width || 1) * (obj.scaleX || 1),
-            height: (obj.height || 1) * (obj.scaleY || 1),
-            angle: obj.angle ?? 0,
-            visible: obj.visible ?? true,
-            locked: !obj.selectable,
-            z: 0,
-          };
-          if (obj.checkfuType === "text") {
-            return {
-              ...base,
-              text: obj.text || "",
-              fontFamily: obj.fontFamily || "Inter",
-              fontSize: obj.fontSize || 24,
-              fontWeight: obj.fontWeight || "normal",
-              italic: obj.fontStyle === "italic",
-              align: obj.textAlign || "left",
-            } as TextChild;
-          } else {
-            return {
-              ...base,
-              src: obj.checkfuSrc as string,
-              crop: null,
-            } as ImageChild;
-          }
+
+        // 1) Read the authoritative state from Fabric
+        const draft = canvas.getObjects().map(buildChildFromObj);
+
+        // 2) Preserve previous ordering where possible (more stable diffs)
+        const prevOrder = new Map<string, number>(
+          (itemsLatestRef.current as (TextChild | ImageChild)[]).map((c, i) => [
+            c.id,
+            i,
+          ]),
+        );
+        draft.sort((a, b) => {
+          const ai = prevOrder.has(a.id)
+            ? (prevOrder.get(a.id) as number)
+            : Number.POSITIVE_INFINITY;
+          const bi = prevOrder.has(b.id)
+            ? (prevOrder.get(b.id) as number)
+            : Number.POSITIVE_INFINITY;
+          return ai - bi;
         });
-        // Skip commit if nothing actually changed to avoid stale overwrites
-        if (!isEqualState(next, items)) {
-          // Defer state commit to the next frame to avoid UI flicker on selection clear
-          requestAnimationFrame(() => onChildrenChange(pageId, next));
+
+        // 3) Avoid no-op writes
+        if (!same(draft, itemsLatestRef.current)) {
+          requestAnimationFrame(() => onChildrenChange(pageId, draft));
         }
         canvas.requestRenderAll();
       };
-      canvas.on("object:modified", commit);
+      // Throttle commits to one per frame
+      let commitRAF: number | null = null;
+      const scheduleCommit = () => {
+        if (isHydrating()) return;
+        if (commitRAF) return;
+        commitRAF = requestAnimationFrame(() => {
+          commitRAF = null;
+          commit();
+        });
+      };
+      canvas.on("object:modified", scheduleCommit);
       // capture text edits so state updates when leaving edit mode
       canvas.on("text:editing:exited", commit as any);
       // also capture live text changes (debounced commit)
@@ -201,6 +260,8 @@ export default function PageCanvasFabric(props: Props) {
         e?.stopPropagation?.();
         const dt: DataTransfer | undefined = e?.dataTransfer;
         if (!dt) return;
+        // Do NOT hydrate here: it can erase freshly-added, not-yet-committed
+        // objects when multiple drops happen quickly. We commit after add.
         const payload = dt.getData("application/checkfu-node");
         const pointer = canvas.getPointer(e);
         if (payload) {
@@ -287,9 +348,11 @@ export default function PageCanvasFabric(props: Props) {
       canvas.on("dragover", stopOver as any);
       canvas.on("drop", handleDrop as any);
 
-      // initial paint
-      await hydrate(canvas, items);
-      canvas.requestRenderAll();
+      // initial paint under hydration fence
+      await withHydration(async () => {
+        await hydrate(canvas, items);
+        canvas.requestRenderAll();
+      });
     })();
 
     return () => {
@@ -310,32 +373,35 @@ export default function PageCanvasFabric(props: Props) {
     canvas.requestRenderAll();
   }, [dims.w, dims.h]);
 
-  // sync objects from state
+  // sync objects from state (fenced)
   useEffect(() => {
     const canvas = fabricRef.current;
     if (!canvas) return;
-    hydrate(canvas, items).then(() => canvas.requestRenderAll());
+    void withHydration(async () => {
+      canvas.discardActiveObject();
+      await hydrate(canvas, items);
+      canvas.requestRenderAll();
+    });
   }, [items]);
 
-  // programmatic selection from store (also re-hydrate to guarantee latest text)
+  // programmatic selection from store (fenced)
   useEffect(() => {
     const canvas = fabricRef.current;
     if (!canvas) return;
     const id = selectedChildId ?? null;
-    if (!id) {
-      canvas.discardActiveObject();
-      canvas.requestRenderAll();
-      return;
-    }
-    // Ensure canvas objects mirror latest store state before selecting
-    hydrate(canvas, items).then(() => {
-      const target = canvas.getObjects().find((o: any) => o.checkfuId === id);
-      if (target) {
-        canvas.setActiveObject(target);
-        if (typeof (target as any).setCoords === "function")
-          (target as any).setCoords();
-        canvas.requestRenderAll();
+    void withHydration(async () => {
+      await hydrate(canvas, items);
+      if (!id) {
+        canvas.discardActiveObject();
+      } else {
+        const target = canvas.getObjects().find((o: any) => o.checkfuId === id);
+        if (target) {
+          canvas.setActiveObject(target);
+          if (typeof (target as any).setCoords === "function")
+            (target as any).setCoords();
+        }
       }
+      canvas.requestRenderAll();
     });
   }, [selectedChildId, items]);
 
@@ -353,6 +419,10 @@ async function hydrate(canvas: any, items: (TextChild | ImageChild)[]) {
   const { IText, Image, Rect, Line, Group } = await import("fabric");
   const current = new Map<string, any>();
   canvas.getObjects().forEach((o: any) => current.set(o.checkfuId, o));
+  // Track active selection to preserve across replacements
+  const active = (canvas.getActiveObject?.() as any) || null;
+  const activeId = active?.checkfuId ?? null;
+  let reselection: any | null = null;
 
   // remove missing
   for (const [id, obj] of current) {
@@ -409,6 +479,7 @@ async function hydrate(canvas: any, items: (TextChild | ImageChild)[]) {
       obj.checkfuId = c.id;
       obj.checkfuType = c.type;
       canvas.add(obj);
+      if (activeId && c.id === activeId) reselection = obj;
     } else {
       // existing object: patch properties, including text/style/src
       if (c.type === "text") {
@@ -464,6 +535,43 @@ async function hydrate(canvas: any, items: (TextChild | ImageChild)[]) {
           }
           obj = newImg;
           current.set(c.id, obj);
+          if (activeId && c.id === activeId) reselection = obj;
+        } else if (!ic.src && !isPlaceholder) {
+          // State cleared src → ensure placeholder is shown
+          const baseW = 200,
+            baseH = 150;
+          const rect = new Rect({
+            left: 0,
+            top: 0,
+            width: baseW,
+            height: baseH,
+            fill: "",
+            stroke: "#94a3b8",
+            strokeDashArray: [4, 3],
+          });
+          const l1 = new Line([0, 0, baseW, baseH], { stroke: "#cbd5e1" });
+          const l2 = new Line([0, baseH, baseW, 0], { stroke: "#cbd5e1" });
+          const idx = canvas.getObjects().indexOf(obj);
+          const placeholder: any = new Group([rect, l1, l2], {
+            left: c.x,
+            top: c.y,
+          });
+          placeholder.checkfuId = c.id;
+          placeholder.checkfuType = "image";
+          placeholder.checkfuSrc = undefined;
+          placeholder.checkfuPlaceholder = true;
+          try {
+            canvas.add(placeholder);
+            if (typeof placeholder.moveTo === "function" && idx >= 0) {
+              placeholder.moveTo(Math.max(0, idx));
+            }
+          } catch {}
+          try {
+            canvas.remove(obj);
+          } catch {}
+          obj = placeholder;
+          current.set(c.id, obj);
+          if (activeId && c.id === activeId) reselection = obj;
         }
       }
     }
@@ -493,4 +601,10 @@ async function hydrate(canvas: any, items: (TextChild | ImageChild)[]) {
     if (o && typeof canvas.bringObjectToFront === "function")
       canvas.bringObjectToFront(o);
   });
+  if (reselection) {
+    try {
+      canvas.setActiveObject?.(reselection);
+    } catch {}
+  }
+  canvas.requestRenderAll?.();
 }

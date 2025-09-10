@@ -7,6 +7,16 @@
  * - Each Page is one US Letter page with a single image (no enforced margins)
  * - Branching creates child variants from a parent image plus a prompt
  * - Inspector manages Page Type, Standards, Style, System Prompt, and Prompt
+ *
+ * Undo/Redo instrumentation (high-level):
+ * - Domain state (pages, children, edges, nodePositions) lives in the
+ *   Zustand store wrapped by zundo; Undo/Redo operate on that.
+ * - UI-only state (spinners, status, current page, text selection) is written
+ *   using writeUI(...) from the store, which pauses temporal so these writes do
+ *   NOT clear Redo or create noisy history entries.
+ * - Generation is staged in memory and applied as a single domain commit; this
+ *   ensures one clean history snapshot per user intent.
+ * - Dragging records a single nodePositions snapshot when the drag ends.
  */
 
 import { useEffect, useRef, useState, useCallback } from "react";
@@ -19,12 +29,12 @@ import {
   ReactFlow,
   Background,
   Controls,
-  addEdge,
+  applyNodeChanges,
   useNodesState,
-  useEdgesState,
+  type NodeChange,
 } from "@xyflow/react";
 import type {
-  Edge,
+  Edge as RFEdge,
   Node as RFNode,
   Connection,
   NodeTypes,
@@ -38,6 +48,10 @@ import {
   useCurrentPageId,
   useCurrentPage,
   useEditorStore,
+  writeUI,
+  useEdges as useGraphEdges,
+  undo,
+  redo,
 } from "@/store/useEditorStore";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -620,9 +634,13 @@ function useDropAndPasteImport<T extends HTMLElement>(
 function useKeyboardShortcuts(opts: {
   onQuickGenerate: () => void;
   onDeleteSelected: () => void;
+  onUndo: () => void;
+  onRedo: () => void;
 }) {
   const onQuick = useEvent(opts.onQuickGenerate);
   const onDelete = useEvent(opts.onDeleteSelected);
+  const onUndo = useEvent(opts.onUndo);
+  const onRedo = useEvent(opts.onRedo);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -639,11 +657,26 @@ function useKeyboardShortcuts(opts: {
       } else if (!editing && (e.key === "Delete" || e.key === "Backspace")) {
         e.preventDefault();
         onDelete();
+      } else if (
+        !editing &&
+        (e.ctrlKey || e.metaKey) &&
+        e.key.toLowerCase() === "z"
+      ) {
+        e.preventDefault();
+        if (e.shiftKey) onRedo();
+        else onUndo();
+      } else if (
+        !editing &&
+        (e.ctrlKey || e.metaKey) &&
+        e.key.toLowerCase() === "y"
+      ) {
+        e.preventDefault();
+        onRedo();
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onQuick, onDelete]);
+  }, [onQuick, onDelete, onUndo, onRedo]);
 }
 
 /**
@@ -729,9 +762,15 @@ export default function Editor() {
   const currentPageId = useCurrentPageId();
   const currentPage = useCurrentPage();
   const actions = useActions();
+  const nodePositions = useEditorStore((s) => s.nodePositions);
   type PageRFNode = RFNode<PageNodeData, "page">;
-  const [nodes, setNodes, onNodesChange] = useNodesState<PageRFNode>([]);
-  const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
+  const [nodes, setNodes] = useNodesState<PageRFNode>([]);
+  const graphEdges = useGraphEdges();
+  const rfEdges: RFEdge[] = graphEdges.map((e) => ({
+    id: e.id,
+    source: e.source,
+    target: e.target,
+  }));
   const [showSettings, setShowSettings] = useState(false);
   // Loaded CCSS Kindergarten standards catalog (code + description)
   const [standardsCatalog, setStandardsCatalog] = useState<
@@ -752,6 +791,22 @@ export default function Editor() {
   const [toasts, setToasts] = useState<
     { id: string; kind: "error" | "info" | "success"; text: string }[]
   >([]);
+  // Per-page operation tokens to cancel stale async writes (model outputs)
+  // after an Undo/Redo or a new operation. See generateInto / text/image updates
+  // where we call beginPageOp() and check isPageOpCurrent() before applying.
+  const pageOpSeqRef = useRef<Record<string, number>>({});
+  // Begin a logical async operation on a page. We use a token (sequence number)
+  // to ignore stale async results that complete after an Undo/Redo or when a
+  // newer op supersedes the old one.
+  const beginPageOp = useCallback((id: string) => {
+    const seq = (pageOpSeqRef.current[id] || 0) + 1;
+    pageOpSeqRef.current[id] = seq;
+    return seq;
+  }, []);
+  const isPageOpCurrent = useCallback(
+    (id: string, seq: number) => pageOpSeqRef.current[id] === seq,
+    [],
+  );
   // Per-node quick prompts for Text/Image inspectors
   const [nodePrompts, setNodePrompts] = useState<Record<string, string>>({});
   // Per-node preset selection (None by default)
@@ -759,6 +814,10 @@ export default function Editor() {
   const lastQuickGenAtRef = useRef<number>(0);
   const generatingAny = pages.some((p) => p.generating);
   const needsApiKey = useGeminiApiKeyNeeded();
+  // Top-bar UI feedback states
+  const [undoFlash, setUndoFlash] = useState(false);
+  const [redoFlash, setRedoFlash] = useState(false);
+  const [exporting, setExporting] = useState(false);
   // Stable handler refs to avoid dependency cycles in callbacks/effects
   const branchFromRef = useRef<(id: string) => void>(() => {});
   const branchFromWithPromptRef = useRef<
@@ -774,6 +833,7 @@ export default function Editor() {
   // Keep current page visible in the sidebar
   useAutoScrollIntoView(currentPageId);
 
+  // Small helper: queue a toast (not related to undo but used in flows)
   function pushToast(
     text: string,
     kind: "error" | "info" | "success" = "info",
@@ -783,24 +843,51 @@ export default function Editor() {
     setTimeout(() => setToasts((ts) => ts.filter((t) => t.id !== id)), 4000);
   }
 
-  // Use hook-supplied onNodesChange directly to avoid loops
-
   // Stable React Flow event handlers to prevent StoreUpdater loops
   const onConnectStable = useCallback(
-    (c: Connection) => setEdges((es) => addEdge(c, es)),
-    [setEdges],
+    (c: Connection) => {
+      if (!c.source || !c.target) return;
+      (actions as any).addEdge?.(c.source, c.target);
+    },
+    [actions],
   );
   const onNodeClickStable = useCallback(
     (_: unknown, n: { id: string }) => actions.setCurrentPage(n.id),
     [actions],
   );
 
+  // Intercept node changes: record final positions into store (single history snapshot)
+  const onNodesChange = useCallback(
+    (changes: NodeChange[]) => {
+      let patch: Record<string, { x: number; y: number }> | null = null;
+      setNodes((nds) => {
+        const next = applyNodeChanges(changes, nds) as PageRFNode[];
+        const ended = changes.some(
+          (c: any) => c.type === "position" && c.dragging === false,
+        );
+        if (ended) {
+          patch = {};
+          for (const ch of changes as any[]) {
+            if (ch.type === "position") {
+              const id = ch.id as string;
+              const n = next.find((nn) => nn.id === id);
+              if (n) patch![id] = { x: n.position.x, y: n.position.y };
+            }
+          }
+        }
+        return next as any;
+      });
+      if (patch && Object.keys(patch).length) {
+        // Defer store update to avoid nested state updates during render
+        queueMicrotask(() => (actions as any).setNodePositions?.(patch!));
+      }
+    },
+    [setNodes, actions],
+  );
+
   const deleteNodes = useCallback(
     (ids: string[]) => {
       if (!ids.length) return;
-      setEdges((es) =>
-        es.filter((e) => !ids.includes(e.source) && !ids.includes(e.target)),
-      );
       ids.forEach((id) => (actions as any).deletePage?.(id));
       const s = useEditorStore.getState();
       if (s.currentPageId && ids.includes(s.currentPageId)) {
@@ -809,7 +896,7 @@ export default function Editor() {
       }
       setNodes((ns) => ns.filter((n) => !ids.includes(n.id)));
     },
-    [setEdges, setNodes, actions],
+    [setNodes, actions],
   );
 
   const setPagePatch = useCallback(
@@ -886,30 +973,44 @@ export default function Editor() {
     quickGenerateRef.current = quickGenerate;
   }, [quickGenerate]);
 
+  // Build instructions for different generation modes.
+  // Note: For text updates we keep the prompt minimal and do NOT include the
+  // page's system prompt that is targeted at image generation. This prevents
+  // the model from returning image-related disclaimers as text.
   const buildInstruction = useCallback(
     (
       page: Page,
       userPrompt: string,
       mode: "page" | "image" | "text" = "page",
     ): string => {
-      const sys = getEffectiveSystemPrompt(page, standardsCatalog).trim();
       const user = (userPrompt || "").trim();
       const parts: string[] = [];
-      if (!user || !user.includes(sys)) parts.push(sys);
+      if (mode === "text") {
+        // For text updates, do NOT include the page image system prompt.
+        // Keep the instruction narrowly focused on returning only new text.
+        parts.push(
+          "You are updating a single short text label for a printable page. Return only the label text, no commentary, no markdown.",
+        );
+        if (user) parts.push(user);
+        return parts.join("\n");
+      }
+
+      // For page/image generation keep the full page system prompt
+      const sys = getEffectiveSystemPrompt(page, standardsCatalog).trim();
       if (mode === "image") {
         const isolation =
           "Treat this as a single image layer. Ignore other layers (text or images) on the page unless explicitly referenced.";
         const optionalText =
           "Include text only if the prompt requests it; otherwise prefer illustration without captions.";
+        parts.push(sys);
         parts.push(
           user
             ? `${user}\n${isolation}\n${optionalText}`
             : `${isolation}\n${optionalText}`,
         );
-      } else if (mode === "text") {
-        if (user) parts.push(user);
       } else {
         const summary = summarizePageForPrompt(page);
+        parts.push(sys);
         if (user) parts.push(user);
         if (summary) parts.push(summary);
       }
@@ -918,19 +1019,27 @@ export default function Editor() {
     [standardsCatalog],
   );
 
+  // Main page generation pipeline.
+  // We protect against stale async writes (after undo/redo) by checking a
+  // per-page op token before every state write. See beginPageOp/isPageOpCurrent.
   const generateInto = useCallback(
     async (pageId: string, prompt: string, pageOverride?: Page) => {
       try {
         const page = pageOverride ?? useEditorStore.getState().pages[pageId]!;
-        setPagePatch(pageId, { generating: true, status: "Generating…" });
+        const op = beginPageOp(pageId);
+        writeUI(() =>
+          setPagePatch(pageId, { generating: true, status: "Generating…" }),
+        );
 
         const instructionText = buildInstruction(page, prompt, "text");
         const instructionImage = buildInstruction(page, prompt, "image");
 
-        // 1) Update all text children with text model
-        let childrenStage = [...(page.children || [])];
-        for (let i = 0; i < childrenStage.length; i++) {
-          const c = childrenStage[i];
+        // Build next state in memory, then commit once
+        const nextChildren = [...(page.children || [])];
+
+        // 1) texts
+        for (let i = 0; i < nextChildren.length; i++) {
+          const c = nextChildren[i];
           if (c.type === "text") {
             const tc = c as TextChild;
             const textPrompt = [
@@ -941,148 +1050,103 @@ export default function Editor() {
             ].join("\n");
             try {
               const out = await generateTextContent(textPrompt);
+              if (!isPageOpCurrent(pageId, op)) return;
               const label = cleanSingleLineLabel(out);
-              childrenStage = childrenStage.map((cc, j) =>
-                j === i ? { ...(tc as TextChild), text: label } : cc,
-              );
-              setPagePatch(pageId, { children: childrenStage });
+              nextChildren[i] = { ...(tc as TextChild), text: label };
             } catch {
               /* ignore individual failure */
             }
           }
         }
 
-        // 2) Update all image children (transform existing; generate placeholders)
-        for (let i = 0; i < childrenStage.length; i++) {
-          const c = childrenStage[i];
+        // 2) images
+        for (let i = 0; i < nextChildren.length; i++) {
+          const c = nextChildren[i];
           if (c.type === "image") {
             const ic = c as ImageChild;
             try {
+              let url: string;
               if (ic.src) {
                 const baseB64 = await blobUrlToPngBase64(ic.src);
-                const url = await transformImageWithPrompt(
-                  baseB64,
-                  instructionImage,
-                );
-                const fitted = await fitImageToRect(url, c.width, c.height);
-                childrenStage = childrenStage.map((cc, j) =>
-                  j === i
-                    ? { ...(cc as ImageChild), src: fitted, placeholder: false }
-                    : cc,
-                );
-                setPagePatch(pageId, { children: childrenStage });
+                url = await transformImageWithPrompt(baseB64, instructionImage);
               } else {
-                const url = await generateColoringBookImage(instructionImage);
-                const fitted = await fitImageToRect(url, c.width, c.height);
-                childrenStage = childrenStage.map((cc, j) =>
-                  j === i
-                    ? { ...(cc as ImageChild), src: fitted, placeholder: false }
-                    : cc,
-                );
-                setPagePatch(pageId, { children: childrenStage });
+                url = await generateColoringBookImage(instructionImage);
               }
+              if (!isPageOpCurrent(pageId, op)) return;
+              const fitted = await fitImageToRect(url, c.width, c.height);
+              nextChildren[i] = {
+                ...(ic as ImageChild),
+                src: fitted,
+                placeholder: false,
+              };
             } catch {
               /* ignore individual failure */
             }
           }
         }
 
-        // 3) Transform or generate the background
+        // 3) background
+        let nextImageUrl: string | undefined = page.imageUrl;
         const baseUrl = page.originalImageUrl || page.imageUrl;
-        if (baseUrl) {
-          try {
+        try {
+          let rawUrl: string;
+          if (baseUrl) {
             const baseB64 = await blobUrlToPngBase64(baseUrl);
-            const rawUrl = await transformImageWithPrompt(
-              baseB64,
-              instructionImage,
-            );
-            const fitted = await fitImageToPrintableArea(rawUrl, page);
-            const prev = useEditorStore.getState().pages[pageId];
-            if (prev) {
-              revokeIfBlob(prev.originalImageUrl);
-              revokeIfBlob(prev.imageUrl);
-            }
-            setPagePatch(pageId, {
-              imageUrl: fitted,
-              originalImageUrl: fitted,
-            });
-          } catch {
-            // if transform fails, fall back to generate
-            try {
-              const rawUrl = await generateColoringBookImage(instructionImage);
-              const fitted = await fitImageToPrintableArea(rawUrl, page);
-              setPagePatch(pageId, {
-                imageUrl: fitted,
-                originalImageUrl: fitted,
-              });
-            } catch {
-              /* ignore */
-            }
+            rawUrl = await transformImageWithPrompt(baseB64, instructionImage);
+          } else {
+            rawUrl = await generateColoringBookImage(instructionImage);
           }
-        } else {
-          try {
-            const rawUrl = await generateColoringBookImage(instructionImage);
-            const fitted = await fitImageToPrintableArea(rawUrl, page);
-            setPagePatch(pageId, {
-              imageUrl: fitted,
-              originalImageUrl: fitted,
-            });
-          } catch {
-            /* ignore */
-          }
+          if (!isPageOpCurrent(pageId, op)) return;
+          nextImageUrl = await fitImageToPrintableArea(rawUrl, page);
+        } catch {
+          /* ignore background failure */
         }
 
-        setPagePatch(pageId, { generating: false, status: "" });
+        // Single commit at the end
+        if (isPageOpCurrent(pageId, op)) {
+          const prev = useEditorStore.getState().pages[pageId];
+          if (prev) {
+            revokeIfBlob(prev.originalImageUrl);
+            revokeIfBlob(prev.imageUrl);
+          }
+          setPagePatch(pageId, {
+            children: nextChildren,
+            imageUrl: nextImageUrl,
+            originalImageUrl: nextImageUrl ?? page.originalImageUrl,
+          });
+          writeUI(() =>
+            setPagePatch(pageId, {
+              generating: false,
+              status: "",
+            }),
+          );
+        }
       } catch (err) {
         pushToast(
           (err as Error).message || "Failed to generate image",
           "error",
         );
-        setPagePatch(pageId, { generating: false, status: "" });
+        writeUI(() => setPagePatch(pageId, { generating: false, status: "" }));
       }
     },
-    [buildInstruction, setPagePatch],
+    [buildInstruction, setPagePatch, beginPageOp, isPageOpCurrent],
   );
 
   // Define branching after generateInto so dependencies are valid
   const branchFromWithPrompt = useCallback(
     async (parentId: string, prompt: string) => {
+      const childId = (actions as any).branch?.(parentId, prompt);
+      if (!childId) return;
+      actions.setCurrentPage(childId);
       const parent = useEditorStore.getState().pages[parentId];
-      if (!parent) return;
-      const id = crypto.randomUUID();
-      const child: Page = {
-        ...parent,
-        id,
-        title: `${parent.title} variant`,
-        prompt,
-        generating: true,
-        status: "Generating…",
-        children: [...(parent.children || [])],
-        selectedChildId: null,
-      };
-      const parentNode = nodes.find((n) => n.id === parentId);
-      const newPos = parentNode
-        ? { x: parentNode.position.x, y: parentNode.position.y + 480 }
-        : { x: 0, y: 480 };
-      (actions as any).addEmptyPage?.(child);
-      setNodes((ns) => {
-        const cleared = ns.map((n) => ({ ...n, selected: false }));
-        const newNode: PageRFNode = {
-          id: child.id,
-          type: "page",
-          position: newPos,
-          dragHandle: ".dragHandlePage",
-          data: { pageId: child.id } as unknown as PageNodeData,
-        } as unknown as PageRFNode;
-        return cleared.concat({ ...newNode, selected: true });
-      });
-      setEdges((es) =>
-        es.concat({ id: crypto.randomUUID(), source: parentId, target: id }),
-      );
-      actions.setCurrentPage(id);
-      await generateInto(id, prompt, { ...parent, id, prompt });
+      // Small delay so Undo immediately after branch removes the page in one step
+      // (generation writes are cancelled if the page disappears)
+      setTimeout(() => {
+        if (!useEditorStore.getState().pages[childId]) return; // page deleted via undo
+        void generateInto(childId, prompt, { ...parent, id: childId, prompt });
+      }, 350);
     },
-    [nodes, setNodes, setEdges, actions, generateInto],
+    [actions, generateInto],
   );
   useEffect(() => {
     branchFromWithPromptRef.current = branchFromWithPrompt;
@@ -1090,16 +1154,19 @@ export default function Editor() {
 
   const generateChildFromParent = useCallback(
     async (childId: string, parent: Page, prompt: string) => {
+      const op = beginPageOp(childId);
       // If there are placeholders, generate into them on the child
       const placeholders = (parent.children || []).filter(
         (c) => c.type === "image" && !(c as ImageChild).src,
       );
       const childDraft: Page = { ...parent, id: childId, prompt };
       if (placeholders.length) {
-        setPagePatch(childId, {
-          generating: true,
-          status: "Filling placeholders…",
-        });
+        writeUI(() =>
+          setPagePatch(childId, {
+            generating: true,
+            status: "Filling placeholders…",
+          }),
+        );
         // clone children array for child
         setPagePatch(childId, { children: [...(parent.children || [])] });
         const instruction = buildInstruction(childDraft, prompt, "image");
@@ -1108,6 +1175,7 @@ export default function Editor() {
           const c = childrenNext[i];
           if (c.type === "image" && !(c as ImageChild).src) {
             const url = await generateColoringBookImage(instruction);
+            if (!isPageOpCurrent(childId, op)) return;
             childrenNext = childrenNext.map((cc, j) =>
               j === i
                 ? { ...(cc as ImageChild), src: url, placeholder: false }
@@ -1116,17 +1184,22 @@ export default function Editor() {
             setPagePatch(childId, { children: childrenNext });
           }
         }
-        setPagePatch(childId, { generating: false, status: "" });
+        if (isPageOpCurrent(childId, op))
+          writeUI(() =>
+            setPagePatch(childId, { generating: false, status: "" }),
+          );
         return;
       }
 
       // Otherwise prefer transforming the flattened page background
       const flattened = await flattenPageToPng(parent);
       const baseUrl = flattened || parent.originalImageUrl || parent.imageUrl;
-      setPagePatch(childId, {
-        generating: true,
-        status: baseUrl ? "Transforming…" : "Generating…",
-      });
+      writeUI(() =>
+        setPagePatch(childId, {
+          generating: true,
+          status: baseUrl ? "Transforming…" : "Generating…",
+        }),
+      );
       if (baseUrl) {
         try {
           const baseB64 = await blobUrlToPngBase64(baseUrl);
@@ -1136,12 +1209,14 @@ export default function Editor() {
           const prev = useEditorStore.getState().pages[childId];
           revokeIfBlob(prev?.originalImageUrl);
           revokeIfBlob(prev?.imageUrl);
+          if (!isPageOpCurrent(childId, op)) return;
           setPagePatch(childId, {
             imageUrl: fitted,
             originalImageUrl: fitted,
-            generating: false,
-            status: "",
           });
+          writeUI(() =>
+            setPagePatch(childId, { generating: false, status: "" }),
+          );
           return;
         } catch (e) {
           console.warn("Transform failed; falling back to generate", e);
@@ -1150,7 +1225,13 @@ export default function Editor() {
       }
       await generateInto(childId, prompt, childDraft);
     },
-    [buildInstruction, generateInto, setPagePatch],
+    [
+      buildInstruction,
+      generateInto,
+      setPagePatch,
+      beginPageOp,
+      isPageOpCurrent,
+    ],
   );
   useEffect(() => {
     generateChildFromParentRef.current = generateChildFromParent;
@@ -1159,26 +1240,15 @@ export default function Editor() {
   const deleteNode = useCallback(
     (pageId: string) => {
       if (!confirm("Delete this node?")) return;
-      // Find parents and children
-      const incoming = edges.filter((e) => e.target === pageId);
-      const outgoing = edges.filter((e) => e.source === pageId);
-      const order = useEditorStore.getState().order;
-      const parentId = incoming[0]?.source || order[0]; // reattach to first parent, otherwise root
-      const newEdges: Edge[] = edges
-        .filter((e) => e.source !== pageId && e.target !== pageId) // remove edges touching deleted
-        .concat(
-          outgoing.map((childEdge) => ({
-            id: crypto.randomUUID(),
-            source: parentId!,
-            target: childEdge.target,
-          })),
-        );
-      setEdges(newEdges);
-      (actions as any).deletePage?.(pageId);
+      const s = useEditorStore.getState();
+      const incoming = s.edges.filter((e) => e.target === pageId);
+      const preferred =
+        incoming[0]?.source ?? s.order.find((x) => x !== pageId) ?? null;
+      (actions as any).deletePageWithReattach?.(pageId, preferred);
       setNodes((ns) => ns.filter((n) => n.id !== pageId));
-      if (currentPageId === pageId) actions.setCurrentPage(parentId!);
+      if (currentPageId === pageId) actions.setCurrentPage(preferred);
     },
-    [edges, currentPageId, setEdges, setNodes, actions],
+    [currentPageId, setNodes, actions],
   );
   useEffect(() => {
     deleteNodeRef.current = deleteNode;
@@ -1198,10 +1268,13 @@ export default function Editor() {
     setNodes((old) => {
       const next = pages.map((p, i) => {
         const existing = old.find((n) => n.id === p.id);
-        const pos = existing?.position || {
-          x: (i % 3) * 380,
-          y: Math.floor(i / 3) * 480,
-        };
+        const storePos = nodePositions[p.id];
+        const pos = storePos
+          ? { x: storePos.x, y: storePos.y }
+          : existing?.position || {
+              x: (i % 3) * 380,
+              y: Math.floor(i / 3) * 480,
+            };
         const node: PageRFNode = {
           id: p.id,
           type: "page",
@@ -1233,7 +1306,7 @@ export default function Editor() {
         });
       return equal ? old : next;
     });
-  }, [pages, currentPageId, setNodes]);
+  }, [pages, currentPageId, setNodes, nodePositions]);
 
   // Drop & paste handlers and keyboard shortcuts via hooks
   const flowRef = useRef<HTMLDivElement | null>(null);
@@ -1244,6 +1317,8 @@ export default function Editor() {
     },
     (msg) => pushToast(msg, "error"),
   );
+  // Keyboard wiring: delegate to zundo helpers for undo/redo. We guard against
+  // active inputs so typing in text fields doesn't trigger editor shortcuts.
   useKeyboardShortcuts({
     onQuickGenerate: () => {
       if (currentPageId) void quickGenerate(currentPageId);
@@ -1253,6 +1328,8 @@ export default function Editor() {
       if (selected.length > 1) deleteNodes(selected);
       else if (currentPageId) deleteNode(currentPageId);
     },
+    onUndo: () => undo(),
+    onRedo: () => redo(),
   });
 
   // Simple BW threshold processing (apply to current page using originalImageUrl)
@@ -1292,11 +1369,88 @@ export default function Editor() {
           <span className="font-semibold">Checkfu</span>
         </div>
         <div className="flex items-center gap-2">
+          {/* Undo/Redo moved to the right side; icon-only, consistent height */}
           <button
-            className="inline-flex items-center gap-2 px-3 py-1.5 rounded-md border text-sm disabled:opacity-50"
-            aria-label="Export to PDF"
-            disabled={!pages.length}
+            className={`inline-flex h-9 w-9 items-center justify-center rounded-md border text-sm transition select-none hover:bg-slate-50 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
+              undoFlash ? "bg-blue-50 border-blue-300" : ""
+            }`}
+            aria-label="Undo"
+            title="Undo (Cmd/Ctrl+Z)"
             onClick={() => {
+              setUndoFlash(true);
+              setTimeout(() => setUndoFlash(false), 180);
+              undo();
+              // Clear transient spinners and invalidate old ops (UI-only)
+              const ids = useEditorStore.getState().order;
+              ids.forEach((id) =>
+                writeUI(() =>
+                  (actions as any).patchPage?.(id, {
+                    generating: false,
+                    status: "",
+                  }),
+                ),
+              );
+              pageOpSeqRef.current = {};
+            }}
+          >
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden
+            >
+              <path d="M9 14l-4-4 4-4" />
+              <path d="M5 10h9a5 5 0 1 1 0 10H7" />
+            </svg>
+          </button>
+          <button
+            className={`inline-flex h-9 w-9 items-center justify-center rounded-md border text-sm transition select-none hover:bg-slate-50 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
+              redoFlash ? "bg-blue-50 border-blue-300" : ""
+            }`}
+            aria-label="Redo"
+            title="Redo (Cmd/Ctrl+Shift+Z / Cmd/Ctrl+Y)"
+            onClick={() => {
+              setRedoFlash(true);
+              setTimeout(() => setRedoFlash(false), 180);
+              redo();
+              const ids = useEditorStore.getState().order;
+              ids.forEach((id) =>
+                writeUI(() =>
+                  (actions as any).patchPage?.(id, {
+                    generating: false,
+                    status: "",
+                  }),
+                ),
+              );
+              pageOpSeqRef.current = {};
+            }}
+          >
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden
+            >
+              <path d="M15 6l4 4-4 4" />
+              <path d="M19 10H10a5 5 0 1 0 0 10h7" />
+            </svg>
+          </button>
+          <button
+            className="inline-flex h-9 items-center gap-2 px-3 rounded-md border text-sm disabled:opacity-50 transition hover:bg-slate-50 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+            aria-label="Export to PDF"
+            aria-busy={exporting}
+            disabled={!pages.length || exporting}
+            onClick={async () => {
               const selected = nodes
                 .filter((n) => n.selected)
                 .map((n) => useEditorStore.getState().pages[n.id])
@@ -1307,10 +1461,39 @@ export default function Editor() {
                   ? [currentPage]
                   : [];
               if (!toExport.length) return;
-              void exportPagesToPdf(toExport);
+              setExporting(true);
+              try {
+                await exportPagesToPdf(toExport);
+                pushToast("Exported PDF", "success");
+              } catch {
+                pushToast("Failed to export PDF", "error");
+              } finally {
+                setExporting(false);
+              }
             }}
           >
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden
+            >
+              <path d="M12 3v12" />
+              <path d="M8 11l4 4 4-4" />
+              <path d="M6 19h12" />
+            </svg>
             <span>Export to PDF</span>
+            {exporting ? (
+              <span
+                className="h-4 w-4 rounded-full border-2 border-sky-600 border-t-transparent animate-spin"
+                aria-hidden
+              />
+            ) : null}
             {nodes.filter((n) => n.selected).length > 1 ? (
               <span
                 className="px-1.5 h-5 min-w-[1.25rem] inline-flex items-center justify-center rounded bg-blue-100 text-blue-800 text-xs"
@@ -1321,7 +1504,7 @@ export default function Editor() {
             ) : null}
           </button>
           <button
-            className={`px-3 py-1.5 rounded-md border text-sm inline-flex items-center gap-2 ${needsApiKey ? "border-amber-400 bg-amber-50 text-amber-800" : ""}`}
+            className={`inline-flex h-9 items-center gap-2 px-3 rounded-md border text-sm transition hover:bg-slate-50 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${needsApiKey ? "border-amber-400 bg-amber-50 text-amber-800" : ""}`}
             aria-label="Settings"
             title={
               needsApiKey
@@ -1342,7 +1525,7 @@ export default function Editor() {
               aria-hidden
             >
               <circle cx="12" cy="12" r="3"></circle>
-              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06A2 2 0 1 1 7.04 2.4l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c0 .63.37 1.2.95 1.45.33.14.68.27 1.05.37" />
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06A2 2 0 1 1 7.04 2.4l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06-.06a1.65 1.65 0 0 0-.33 1.82V9c0 .63.37 1.2.95 1.45.33.14.68.27 1.05.37" />
             </svg>
             {needsApiKey ? "Add API Key" : "API Key"}
           </button>
@@ -1416,7 +1599,7 @@ export default function Editor() {
                   selectedChildId: null,
                 };
                 (actions as any).addEmptyPage?.(p);
-                actions.setCurrentPage(p.id);
+                // setCurrentPage is already done inside addEmptyPage; avoid redundant set
               }}
             >
               <svg
@@ -1579,7 +1762,7 @@ export default function Editor() {
           <div className="w-full h-full" ref={flowRef}>
             <ReactFlow
               nodes={nodes}
-              edges={edges}
+              edges={rfEdges}
               fitView
               fitViewOptions={RF_FIT_VIEW_OPTIONS}
               defaultViewport={RF_DEFAULT_VIEWPORT}
@@ -1588,7 +1771,6 @@ export default function Editor() {
               translateExtent={RF_TRANSLATE_EXTENT}
               nodeTypes={nodeTypes}
               onNodesChange={onNodesChange}
-              onEdgesChange={onEdgesChange}
               onNodeClick={onNodeClickStable}
               onConnect={onConnectStable}
               noPanClassName="nopan"
@@ -1846,6 +2028,22 @@ export default function Editor() {
                                     ),
                                   })
                                 }
+                                onKeyDown={(e) => {
+                                  if (
+                                    (e.metaKey || e.ctrlKey) &&
+                                    e.key.toLowerCase() === "z"
+                                  ) {
+                                    e.preventDefault();
+                                    if (e.shiftKey) redo();
+                                    else undo();
+                                  } else if (
+                                    (e.metaKey || e.ctrlKey) &&
+                                    e.key.toLowerCase() === "y"
+                                  ) {
+                                    e.preventDefault();
+                                    redo();
+                                  }
+                                }}
                               />
                               <label className="text-xs">Font Size</label>
                               <input
@@ -1915,10 +2113,13 @@ export default function Editor() {
                                     nodePrompts[child.id] ?? ""
                                   ).trim();
                                   try {
-                                    setPagePatch(currentPageId!, {
-                                      generating: true,
-                                      status: "Generating text…",
-                                    });
+                                    const op = beginPageOp(currentPageId!);
+                                    writeUI(() =>
+                                      setPagePatch(currentPageId!, {
+                                        generating: true,
+                                        status: "Generating text…",
+                                      }),
+                                    );
                                     const textPrompt = [
                                       buildInstruction(
                                         currentPage!,
@@ -1931,6 +2132,8 @@ export default function Editor() {
                                     ].join("\n");
                                     const out =
                                       await generateTextContent(textPrompt);
+                                    if (!isPageOpCurrent(currentPageId!, op))
+                                      return;
                                     const label = cleanSingleLineLabel(out);
                                     setPagePatch(currentPageId!, {
                                       children: (
@@ -1940,14 +2143,20 @@ export default function Editor() {
                                           ? { ...(c as TextChild), text: label }
                                           : c,
                                       ),
-                                      generating: false,
-                                      status: "",
                                     });
+                                    writeUI(() =>
+                                      setPagePatch(currentPageId!, {
+                                        generating: false,
+                                        status: "",
+                                      }),
+                                    );
                                   } catch (err) {
-                                    setPagePatch(currentPageId!, {
-                                      generating: false,
-                                      status: "",
-                                    });
+                                    writeUI(() =>
+                                      setPagePatch(currentPageId!, {
+                                        generating: false,
+                                        status: "",
+                                      }),
+                                    );
                                     pushToast(
                                       (err as Error)?.message ||
                                         "Failed to generate text",

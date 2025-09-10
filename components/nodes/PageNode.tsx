@@ -2,8 +2,11 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 /**
- * PageNode
- * React Flow node that renders a single printable page with a Fabric canvas and branching toolbar.
+ * PageNode — React Flow node that renders a single printable page.
+ *
+ * Store‑driven mode (data.pageId) keeps the graph light: the node receives a
+ * pageId and pulls live state from the domain store. All edits inside the
+ * Fabric canvas push changes back via replaceChildren/selectChild.
  */
 
 import { memo, useMemo, useState } from "react";
