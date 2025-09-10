@@ -4,15 +4,16 @@
  * Editor
  * Node-based generator for printable K–1 pages
  * - Graph of Page nodes rendered via React Flow
- * - Each Page is one US Letter page with margins and a single image
+ * - Each Page is one US Letter page with a single image (no enforced margins)
  * - Branching creates child variants from a parent image plus a prompt
  * - Inspector manages Page Type, Standards, Style, System Prompt, and Prompt
  */
 
-import { useEffect, useRef, useState, useCallback, useMemo } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import {
   generateColoringBookImage,
   transformImageWithPrompt,
+  generateTextContent,
 } from "@/lib/nanoBanana";
 import {
   ReactFlow,
@@ -25,38 +26,28 @@ import {
 import type {
   Edge,
   Node as RFNode,
-  NodeChange,
   Connection,
   NodeTypes,
 } from "@xyflow/react";
 import { jsPDF } from "jspdf";
 import PageNode, { type PageNodeData } from "@/components/nodes/PageNode";
+// Layers panel removed from Inspector to focus on a single selection
+import {
+  useActions,
+  usePages,
+  useCurrentPageId,
+  useCurrentPage,
+  useEditorStore,
+} from "@/store/useEditorStore";
 
-/**
- * Module: Types
- */
-
-type Orientation = "portrait" | "landscape";
-
-type Page = {
-  id: string;
-  title: string;
-  orientation: Orientation;
-  marginInches: number;
-  imageUrl?: string; // processed/display URL (object URL or dataURL)
-  originalImageUrl?: string; // source before BW processing
-  prompt?: string;
-  systemPrompt?: string;
-  systemPromptEdited?: boolean;
-  bwThreshold?: number; // 0-255
-  pageType?: "worksheet" | "coloring";
-  coloringStyle?: "classic" | "anime" | "retro";
-  standards?: string[];
-  generating?: boolean;
-  status?: PageStatus;
-};
-
-type PageStatus = "Transforming…" | "Generating…" | "" | string;
+/* eslint-disable @typescript-eslint/no-explicit-any */
+// Types now sourced from global editor store
+import type {
+  Page,
+  TextChild,
+  ImageChild,
+  Orientation,
+} from "@/store/useEditorStore";
 
 /**
  * Module: Constants and narrow utilities
@@ -64,12 +55,19 @@ type PageStatus = "Transforming…" | "Generating…" | "" | string;
 
 const DPI = 96;
 const DEFAULT_THRESHOLD = 200;
-const DEFAULT_MARGIN_IN = 0.5;
 
 const getLetterSizeIn = (o: Orientation) =>
   o === "portrait" ? { w: 8.5, h: 11 } : { w: 11, h: 8.5 };
 
 export const nodeTypes: NodeTypes = { page: PageNode };
+
+// React Flow stable constants to avoid prop identity churn
+const RF_FIT_VIEW_OPTIONS = { padding: 0.22 } as const;
+const RF_DEFAULT_VIEWPORT = { x: 0, y: 0, zoom: 0.72 } as const;
+const RF_TRANSLATE_EXTENT: [[number, number], [number, number]] = [
+  [-100000, -100000],
+  [100000, 100000],
+];
 
 function revokeIfBlob(url?: string) {
   try {
@@ -94,13 +92,11 @@ async function createImage(src: string) {
  * Module: Image utilities — fit, trim, threshold, base64
  */
 
-function computePrintablePx(p: Page): { pxW: number; pxH: number } {
+function computePagePx(p: Page): { pxW: number; pxH: number } {
   const { w, h } = getLetterSizeIn(p.orientation);
-  const imgWIn = w - 2 * (p.marginInches || 0);
-  const imgHIn = h - 2 * (p.marginInches || 0);
   return {
-    pxW: Math.max(1, Math.round(imgWIn * DPI)),
-    pxH: Math.max(1, Math.round(imgHIn * DPI)),
+    pxW: Math.max(1, Math.round(w * DPI)),
+    pxH: Math.max(1, Math.round(h * DPI)),
   };
 }
 
@@ -121,7 +117,7 @@ async function blobUrlToPngBase64(url: string): Promise<string> {
 }
 
 async function fitImageToPrintableArea(url: string, p: Page): Promise<string> {
-  const { pxW, pxH } = computePrintablePx(p);
+  const { pxW, pxH } = computePagePx(p);
   const img = await createImage(url);
 
   const srcCanvas = document.createElement("canvas");
@@ -203,19 +199,134 @@ async function fitImageToPrintableArea(url: string, p: Page): Promise<string> {
   if (!ctx) return url;
   ctx.imageSmoothingQuality = "high";
 
-  const pad = Math.max(6, Math.round(Math.min(pxW, pxH) * 0.02));
-  const availW = Math.max(1, pxW - 2 * pad);
-  const availH = Math.max(1, pxH - 2 * pad);
+  const availW = pxW;
+  const availH = pxH;
   const scale = Math.min(availW / Math.max(1, sw), availH / Math.max(1, sh));
   const dw = Math.max(1, Math.round(sw * scale));
   const dh = Math.max(1, Math.round(sh * scale));
-  const dx = pad + Math.floor((availW - dw) / 2);
-  const dy = pad + Math.floor((availH - dh) / 2);
+  const dx = Math.floor((availW - dw) / 2);
+  const dy = Math.floor((availH - dh) / 2);
 
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, pxW, pxH);
   ctx.drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh);
   return c.toDataURL("image/png");
+}
+
+// Trim white borders and fit an image into a target rectangle (node) while preserving aspect.
+// No extra padding is added; any remaining gap is due to aspect mismatch.
+async function fitImageToRect(
+  url: string,
+  targetW: number,
+  targetH: number,
+): Promise<string> {
+  const img = await createImage(url);
+  const srcCanvas = document.createElement("canvas");
+  srcCanvas.width = img.width;
+  srcCanvas.height = img.height;
+  const sctx = srcCanvas.getContext("2d");
+  if (!sctx) return url;
+  sctx.drawImage(img, 0, 0);
+  const data = sctx.getImageData(0, 0, img.width, img.height).data;
+  const isWhite = (i: number) => {
+    const r = data[i],
+      g = data[i + 1],
+      b = data[i + 2],
+      a = data[i + 3];
+    if (a < 8) return true;
+    const y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    return y > 250; // treat near-white as background
+  };
+  let top = 0,
+    bottom = img.height - 1,
+    left = 0,
+    right = img.width - 1;
+  // scan top
+  scanTop: for (let y = 0; y < img.height; y++) {
+    for (let x = 0; x < img.width; x += 2) {
+      const i = (y * img.width + x) * 4;
+      if (!isWhite(i)) {
+        top = Math.max(0, y - 1);
+        break scanTop;
+      }
+    }
+  }
+  // scan bottom
+  scanBottom: for (let y = img.height - 1; y >= 0; y--) {
+    for (let x = 0; x < img.width; x += 2) {
+      const i = (y * img.width + x) * 4;
+      if (!isWhite(i)) {
+        bottom = Math.min(img.height - 1, y + 1);
+        break scanBottom;
+      }
+    }
+  }
+  // scan left
+  scanLeft: for (let x = 0; x < img.width; x++) {
+    for (let y = 0; y < img.height; y += 2) {
+      const i = (y * img.width + x) * 4;
+      if (!isWhite(i)) {
+        left = Math.max(0, x - 1);
+        break scanLeft;
+      }
+    }
+  }
+  // scan right
+  scanRight: for (let x = img.width - 1; x >= 0; x--) {
+    for (let y = 0; y < img.height; y += 2) {
+      const i = (y * img.width + x) * 4;
+      if (!isWhite(i)) {
+        right = Math.min(img.width - 1, x + 1);
+        break scanRight;
+      }
+    }
+  }
+  let sx = Math.max(0, left),
+    sy = Math.max(0, top);
+  let sw = Math.max(1, right - left + 1),
+    sh = Math.max(1, bottom - top + 1);
+  // guard: if nearly full white detection failed, just use full image
+  if (sw < 8 || sh < 8) {
+    sx = 0;
+    sy = 0;
+    sw = img.width;
+    sh = img.height;
+  }
+
+  const c = document.createElement("canvas");
+  c.width = Math.max(1, Math.round(targetW));
+  c.height = Math.max(1, Math.round(targetH));
+  const ctx = c.getContext("2d");
+  if (!ctx) return url;
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, c.width, c.height);
+  const scale = Math.min(c.width / sw, c.height / sh);
+  const dw = Math.max(1, Math.round(sw * scale));
+  const dh = Math.max(1, Math.round(sh * scale));
+  const dx = Math.floor((c.width - dw) / 2);
+  const dy = Math.floor((c.height - dh) / 2);
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh);
+  return c.toDataURL("image/png");
+}
+
+// Ensure model output for text nodes is a single clean label (no markdown or reasoning)
+function cleanSingleLineLabel(s: string): string {
+  if (!s) return "";
+  let t = String(s);
+  // strip code fences and any markdown blocks
+  t = t.replace(/```[\s\S]*?```/g, " ");
+  // remove common leading words the model might emit
+  t = t.replace(/^\s*(Output|Answer|Label)\s*[:\-]\s*/i, "");
+  // collapse newlines to spaces
+  t = t.replace(/[\r\n]+/g, " ");
+  // strip surrounding quotes/backticks
+  t = t.replace(/^['"`\u201C\u201D]+|['"`\u201C\u201D]+$/g, "");
+  // collapse whitespace
+  t = t.replace(/\s{2,}/g, " ").trim();
+  // limit length to a reasonable label
+  if (t.length > 140) t = t.slice(0, 140);
+  return t;
 }
 
 async function thresholdToDataUrl(
@@ -287,9 +398,8 @@ function computeSystemPrompt(
   const isWorksheet = (p.pageType || "coloring") === "worksheet";
   const { w, h } = getLetterSizeIn(p.orientation);
   const letter = `${w}×${h} ${p.orientation}`;
-  const margin = (p.marginInches ?? DEFAULT_MARGIN_IN).toFixed(2);
   const printRules = [
-    `Print target: US Letter ${letter}. Keep all content inside ${margin} inch margins.`,
+    `Print target: US Letter ${letter}.`,
     "Output: one black and white line art image for print.",
     "Style: thick uniform outlines, high contrast, large closed shapes. No gray tones. No shading. No halftones. No photo textures.",
     "Background: white only.",
@@ -328,7 +438,7 @@ function computeSystemPrompt(
     const wkNegatives = [
       "Do not add titles or headers.",
       "Do not add decorative frames.",
-      "Do not place elements on or past the margins.",
+      "",
       "Do not include stickers, emojis, photographs, or gray fills.",
     ].join(" ");
     return `${ccSummary}${ccDetail}${wk} ${printRules} ${wkNegatives}`.trim();
@@ -364,6 +474,23 @@ function getEffectiveSystemPrompt(
   return page.systemPromptEdited
     ? (page.systemPrompt ?? "")
     : computeSystemPrompt(page, catalog);
+}
+
+// Summarize page children for prompts and generation context
+function summarizePageForPrompt(page: Page): string {
+  const items = (page.children || []).map((c) => {
+    const size = `${Math.round(c.width)}x${Math.round(c.height)}`;
+    const pos = `(${Math.round(c.x)}, ${Math.round(c.y)})`;
+    if (c.type === "text") {
+      const tc = c as TextChild;
+      const text = (tc.text || "").slice(0, 80);
+      return `Text "${text}" at ${pos} size ${size}${tc.align ? ` align ${tc.align}` : ""}`;
+    } else {
+      const ic = c as ImageChild;
+      return `${ic.src ? "Image" : "Image placeholder"} at ${pos} size ${size}`;
+    }
+  });
+  return items.join("\n");
 }
 
 /**
@@ -523,31 +650,69 @@ function useKeyboardShortcuts(opts: {
  * Module: PDF helpers
  */
 
+async function flattenPageToPng(page: Page): Promise<string | null> {
+  if (page.children && page.children.length) {
+    const { StaticCanvas, IText, Image } = await import("fabric");
+    const { pxW, pxH } = computePagePx(page);
+    const canvas = new StaticCanvas(undefined, {
+      width: pxW,
+      height: pxH,
+      backgroundColor: "#fff",
+    });
+    for (const c of page.children) {
+      if (c.visible === false) continue;
+      if (c.type === "text") {
+        const tc = c as TextChild;
+        const t = new IText(tc.text || "", {
+          left: tc.x,
+          top: tc.y,
+          fontFamily: tc.fontFamily || "Inter",
+          fontSize: tc.fontSize || 24,
+          fontWeight: tc.fontWeight || "normal",
+          fontStyle: tc.italic ? "italic" : "",
+          textAlign: tc.align || "left",
+          fill: "#000",
+        });
+        t.set({ angle: c.angle || 0 });
+        if (t.width && t.height) {
+          t.set({
+            scaleX: c.width / t.width,
+            scaleY: c.height / t.height,
+          });
+        }
+        canvas.add(t);
+      } else {
+        const ic = c as ImageChild;
+        if (!ic.src) {
+          // skip placeholders in flatten
+          continue;
+        }
+        const img = await Image.fromURL(ic.src, { crossOrigin: "anonymous" });
+        img.set({ left: ic.x, top: ic.y, angle: ic.angle || 0 });
+        if (img.width && img.height) {
+          img.set({
+            scaleX: ic.width / img.width,
+            scaleY: ic.height / img.height,
+          });
+        }
+        canvas.add(img);
+      }
+    }
+    canvas.renderAll();
+    return canvas.toDataURL({ format: "png", multiplier: 2 });
+  }
+  if (page.imageUrl) return page.imageUrl;
+  return null;
+}
+
 async function addPageToJsPdf(pdf: jsPDF, page: Page) {
   const { w: pageW, h: pageH } = getLetterSizeIn(page.orientation);
-  const m = page.marginInches;
-  const imgW = pageW - 2 * m;
-  const imgH = pageH - 2 * m;
-  const img = await createImage(page.imageUrl as string);
-  const canvas = document.createElement("canvas");
-  const dpr = 2;
-  const pxW = Math.round(imgW * DPI),
-    pxH = Math.round(imgH * DPI);
-  canvas.width = pxW * dpr;
-  canvas.height = pxH * dpr;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) throw new Error("No canvas context");
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  const scale = Math.min(pxW / img.width, pxH / img.height);
-  const dw = Math.round(img.width * scale),
-    dh = Math.round(img.height * scale);
-  const dx = Math.floor((pxW - dw) / 2),
-    dy = Math.floor((pxH - dh) / 2);
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(0, 0, pxW, pxH);
-  ctx.drawImage(img, dx, dy, dw, dh);
-  const dataUrl = canvas.toDataURL("image/png");
-  pdf.addImage(dataUrl, "PNG", m, m, imgW, imgH, undefined, "FAST");
+  const m = 0;
+  const imgW = pageW;
+  const imgH = pageH;
+  const png = await flattenPageToPng(page);
+  if (!png) return;
+  pdf.addImage(png, "PNG", m, m, imgW, imgH, undefined, "FAST");
   const codes = (page.standards || []).join(", ");
   if (codes) {
     pdf.setFontSize(8);
@@ -560,19 +725,10 @@ async function addPageToJsPdf(pdf: jsPDF, page: Page) {
  */
 
 export default function Editor() {
-  type PagesIndex = { byId: Record<string, Page>; order: string[] };
-  const [pagesIndex, setPagesIndex] = useState<PagesIndex>({
-    byId: {},
-    order: [],
-  });
-  const pages = useMemo(
-    () => pagesIndex.order.map((id) => pagesIndex.byId[id]).filter(Boolean),
-    [pagesIndex],
-  );
-  const [currentPageId, setCurrentPageId] = useState<string | null>(null);
-  const currentPage = currentPageId
-    ? (pagesIndex.byId[currentPageId] ?? null)
-    : null;
+  const pages = usePages();
+  const currentPageId = useCurrentPageId();
+  const currentPage = useCurrentPage();
+  const actions = useActions();
   type PageRFNode = RFNode<PageNodeData, "page">;
   const [nodes, setNodes, onNodesChange] = useNodesState<PageRFNode>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
@@ -587,9 +743,7 @@ export default function Editor() {
       try {
         const flat = await loadKStandards();
         if (!cancelled) setStandardsCatalog(flat);
-      } catch {
-        /* ignore */
-      }
+      } catch {}
     })();
     return () => {
       cancelled = true;
@@ -598,6 +752,10 @@ export default function Editor() {
   const [toasts, setToasts] = useState<
     { id: string; kind: "error" | "info" | "success"; text: string }[]
   >([]);
+  // Per-node quick prompts for Text/Image inspectors
+  const [nodePrompts, setNodePrompts] = useState<Record<string, string>>({});
+  // Per-node preset selection (None by default)
+  const [nodePresets, setNodePresets] = useState<Record<string, string>>({});
   const lastQuickGenAtRef = useRef<number>(0);
   const generatingAny = pages.some((p) => p.generating);
   const needsApiKey = useGeminiApiKeyNeeded();
@@ -625,34 +783,17 @@ export default function Editor() {
     setTimeout(() => setToasts((ts) => ts.filter((t) => t.id !== id)), 4000);
   }
 
-  const handleNodesChange = (changes: NodeChange<PageRFNode>[]) => {
-    const removedIds = new Set(
-      changes
-        .filter(
-          (c): c is { type: "remove"; id: string } =>
-            (c as unknown as { type: string }).type === "remove",
-        )
-        .map((c) => c.id)
-        .filter(Boolean),
-    );
-    onNodesChange(changes);
-    if (removedIds.size) {
-      setPagesIndex((s) => {
-        const byId = { ...s.byId } as Record<string, Page>;
-        for (const id of removedIds) delete byId[id];
-        const order = s.order.filter((id) => !removedIds.has(id));
-        setCurrentPageId((prev) =>
-          prev && removedIds.has(prev) ? (order[0] ?? null) : prev,
-        );
-        return { byId, order };
-      });
-      setEdges((es) =>
-        es.filter(
-          (e) => !removedIds.has(e.source) && !removedIds.has(e.target),
-        ),
-      );
-    }
-  };
+  // Use hook-supplied onNodesChange directly to avoid loops
+
+  // Stable React Flow event handlers to prevent StoreUpdater loops
+  const onConnectStable = useCallback(
+    (c: Connection) => setEdges((es) => addEdge(c, es)),
+    [setEdges],
+  );
+  const onNodeClickStable = useCallback(
+    (_: unknown, n: { id: string }) => actions.setCurrentPage(n.id),
+    [actions],
+  );
 
   const deleteNodes = useCallback(
     (ids: string[]) => {
@@ -660,32 +801,28 @@ export default function Editor() {
       setEdges((es) =>
         es.filter((e) => !ids.includes(e.source) && !ids.includes(e.target)),
       );
-      setPagesIndex((s) => {
-        const byId = { ...s.byId } as Record<string, Page>;
-        for (const id of ids) delete byId[id];
-        const order = s.order.filter((id) => !ids.includes(id));
-        setCurrentPageId((prev) =>
-          prev && ids.includes(prev) ? (order[0] ?? null) : prev,
-        );
-        return { byId, order };
-      });
+      ids.forEach((id) => (actions as any).deletePage?.(id));
+      const s = useEditorStore.getState();
+      if (s.currentPageId && ids.includes(s.currentPageId)) {
+        const nextId = s.order[0] ?? null;
+        actions.setCurrentPage(nextId);
+      }
       setNodes((ns) => ns.filter((n) => !ids.includes(n.id)));
     },
-    [setEdges, setNodes],
+    [setEdges, setNodes, actions],
   );
 
-  function setPagePatch(id: string, patch: Partial<Page>) {
-    setPagesIndex((s) => {
-      const prev = s.byId[id];
-      if (!prev) return s;
-      return { ...s, byId: { ...s.byId, [id]: { ...prev, ...patch } } };
-    });
-  }
+  const setPagePatch = useCallback(
+    (id: string, patch: Partial<Page>) => {
+      actions.patchPage(id, patch);
+    },
+    [actions],
+  );
 
   // Convert image to 1‑bit black/white at a given threshold
   const applyThreshold = useCallback(
     async (pageId: string, threshold: number) => {
-      const page = pagesIndex.byId[pageId];
+      const page = useEditorStore.getState().pages[pageId];
       if (!page || !page.originalImageUrl) return;
       try {
         const url = await thresholdToDataUrl(page.originalImageUrl, threshold);
@@ -695,39 +832,20 @@ export default function Editor() {
         /* ignore */
       }
     },
-    [pagesIndex],
+    [setPagePatch],
   );
 
   // System prompt is derived on read via getEffectiveSystemPrompt (no Effect)
 
   const addPageFromImage = useCallback(
-    (url: string, title = "Image", overrides?: Partial<Page>): string => {
-      const id = crypto.randomUUID();
-      const newPage: Page = {
-        id,
-        title,
-        orientation: "portrait",
-        marginInches: DEFAULT_MARGIN_IN,
-        originalImageUrl: url,
-        imageUrl: url,
-        bwThreshold: DEFAULT_THRESHOLD,
-        pageType: "coloring",
-        coloringStyle: "classic",
-        standards: [],
-        systemPrompt: "",
-        systemPromptEdited: false,
-        ...overrides,
-      };
-      setPagesIndex((s) => ({
-        byId: { ...s.byId, [id]: newPage },
-        order: s.order.concat(id),
-      }));
-      setCurrentPageId(id);
-      // apply default threshold
-      void applyThreshold(id, newPage.bwThreshold || DEFAULT_THRESHOLD);
-      return id;
+    (url: string, title = "Image", overrides?: Partial<Page>) => {
+      const id =
+        (actions as any).addPageFromImage?.(url, title, overrides) ??
+        crypto.randomUUID();
+      // optionally apply threshold here if needed
+      return id as string;
     },
-    [applyThreshold],
+    [actions],
   );
 
   // Branch prompt modal state
@@ -736,104 +854,66 @@ export default function Editor() {
   );
   const [branchPrompt, setBranchPrompt] = useState<string>("");
 
-  const branchFrom = useCallback(
-    (parentId: string) => {
-      const parent = pagesIndex.byId[parentId];
-      if (!parent) return;
-      setBranchingParentId(parentId);
-      setBranchPrompt(parent.prompt || "");
-    },
-    [pagesIndex],
-  );
+  const branchFrom = useCallback((parentId: string) => {
+    const parent = useEditorStore.getState().pages[parentId];
+    if (!parent) return;
+    setBranchingParentId(parentId);
+    setBranchPrompt(parent.prompt || "");
+  }, []);
   useEffect(() => {
     branchFromRef.current = branchFrom;
   }, [branchFrom]);
 
-  const branchFromWithPrompt = useCallback(
-    async (parentId: string, prompt: string) => {
-      const parent = pagesIndex.byId[parentId];
-      if (!parent) return;
-      const id = crypto.randomUUID();
-      const child: Page = {
-        ...parent,
-        id,
-        title: `${parent.title} variant`,
-        prompt,
-        generating: true,
-        status: "Transforming…",
-      };
-      const parentNode = nodes.find((n) => n.id === parentId);
-      const newPos = parentNode
-        ? { x: parentNode.position.x, y: parentNode.position.y + 480 }
-        : { x: 0, y: 480 };
-      setPagesIndex((s) => ({
-        byId: { ...s.byId, [id]: child },
-        order: s.order.concat(id),
-      }));
-      setNodes((ns) => {
-        // unselect all existing nodes and add the new one as selected
-        const cleared = ns.map((n) => ({ ...n, selected: false }));
-        const newNode: PageRFNode = {
-          id: child.id,
-          type: "page",
-          position: newPos,
-          data: {
-            id: child.id,
-            title: child.title,
-            orientation: child.orientation,
-            marginInches: child.marginInches,
-            imageUrl: child.imageUrl,
-            loading: !!child.generating,
-            loadingText: child.status,
-            onBranch: (pid: string) => branchFromRef.current(pid),
-            onBranchWithPrompt: (pid: string, prompt2: string) =>
-              branchFromWithPromptRef.current(pid, prompt2),
-            onDelete: (pid: string) => deleteNodeRef.current(pid),
-            onQuickGenerate: (pid: string) => quickGenerateRef.current(pid),
-          },
-        };
-        return cleared.concat({ ...newNode, selected: true });
-      });
-      setEdges((es) =>
-        es.concat({ id: crypto.randomUUID(), source: parentId, target: id }),
-      );
-      setCurrentPageId(id);
-      await generateChildFromParentRef.current(id, parent, prompt);
-    },
-    [pagesIndex, nodes, setNodes, setEdges],
-  );
-  useEffect(() => {
-    branchFromWithPromptRef.current = branchFromWithPrompt;
-  }, [branchFromWithPrompt]);
+  // branchFromWithPrompt is defined later (after generateInto) to avoid TS hoisting complaints
 
-  const quickGenerate = useCallback(
-    async (pageId: string) => {
-      const page = pagesIndex.byId[pageId];
-      if (!page) return;
-      const now = Date.now();
-      if (now - lastQuickGenAtRef.current < 1200) {
-        return;
-      }
-      lastQuickGenAtRef.current = now;
-      const prompt = (page.prompt || "").trim();
-      if (!prompt) {
-        setBranchingParentId(pageId);
-        setBranchPrompt("");
-        return;
-      }
-      await branchFromWithPromptRef.current(pageId, prompt);
-    },
-    [pagesIndex],
-  );
+  const quickGenerate = useCallback(async (pageId: string) => {
+    const page = useEditorStore.getState().pages[pageId];
+    if (!page) return;
+    const now = Date.now();
+    if (now - lastQuickGenAtRef.current < 1200) {
+      return;
+    }
+    lastQuickGenAtRef.current = now;
+    const prompt = (page.prompt || "").trim();
+    if (!prompt) {
+      setBranchingParentId(pageId);
+      setBranchPrompt("");
+      return;
+    }
+    await branchFromWithPromptRef.current(pageId, prompt);
+  }, []);
   useEffect(() => {
     quickGenerateRef.current = quickGenerate;
   }, [quickGenerate]);
 
   const buildInstruction = useCallback(
-    (page: Page, userPrompt: string): string => {
+    (
+      page: Page,
+      userPrompt: string,
+      mode: "page" | "image" | "text" = "page",
+    ): string => {
       const sys = getEffectiveSystemPrompt(page, standardsCatalog).trim();
       const user = (userPrompt || "").trim();
-      return [sys, user].filter(Boolean).join(" ");
+      const parts: string[] = [];
+      if (!user || !user.includes(sys)) parts.push(sys);
+      if (mode === "image") {
+        const isolation =
+          "Treat this as a single image layer. Ignore other layers (text or images) on the page unless explicitly referenced.";
+        const optionalText =
+          "Include text only if the prompt requests it; otherwise prefer illustration without captions.";
+        parts.push(
+          user
+            ? `${user}\n${isolation}\n${optionalText}`
+            : `${isolation}\n${optionalText}`,
+        );
+      } else if (mode === "text") {
+        if (user) parts.push(user);
+      } else {
+        const summary = summarizePageForPrompt(page);
+        if (user) parts.push(user);
+        if (summary) parts.push(summary);
+      }
+      return parts.join("\n");
     },
     [standardsCatalog],
   );
@@ -841,22 +921,118 @@ export default function Editor() {
   const generateInto = useCallback(
     async (pageId: string, prompt: string, pageOverride?: Page) => {
       try {
-        const page = pageOverride ?? pagesIndex.byId[pageId]!;
+        const page = pageOverride ?? useEditorStore.getState().pages[pageId]!;
         setPagePatch(pageId, { generating: true, status: "Generating…" });
-        const instruction = buildInstruction(page, prompt);
-        const rawUrl = await generateColoringBookImage(instruction);
-        const fitted = await fitImageToPrintableArea(rawUrl, page);
-        const prev = pagesIndex.byId[pageId];
-        if (prev) {
-          revokeIfBlob(prev.originalImageUrl); // avoid leaks from stale object URLs
-          revokeIfBlob(prev.imageUrl); // avoid leaks from stale object URLs
+
+        const instructionText = buildInstruction(page, prompt, "text");
+        const instructionImage = buildInstruction(page, prompt, "image");
+
+        // 1) Update all text children with text model
+        let childrenStage = [...(page.children || [])];
+        for (let i = 0; i < childrenStage.length; i++) {
+          const c = childrenStage[i];
+          if (c.type === "text") {
+            const tc = c as TextChild;
+            const textPrompt = [
+              instructionText,
+              "You are updating a single text label on a printable page.",
+              "Return only the new text, no commentary.",
+              `Current text: "${tc.text || ""}"`,
+            ].join("\n");
+            try {
+              const out = await generateTextContent(textPrompt);
+              const label = cleanSingleLineLabel(out);
+              childrenStage = childrenStage.map((cc, j) =>
+                j === i ? { ...(tc as TextChild), text: label } : cc,
+              );
+              setPagePatch(pageId, { children: childrenStage });
+            } catch {
+              /* ignore individual failure */
+            }
+          }
         }
-        setPagePatch(pageId, {
-          imageUrl: fitted,
-          originalImageUrl: fitted,
-          generating: false,
-          status: "",
-        });
+
+        // 2) Update all image children (transform existing; generate placeholders)
+        for (let i = 0; i < childrenStage.length; i++) {
+          const c = childrenStage[i];
+          if (c.type === "image") {
+            const ic = c as ImageChild;
+            try {
+              if (ic.src) {
+                const baseB64 = await blobUrlToPngBase64(ic.src);
+                const url = await transformImageWithPrompt(
+                  baseB64,
+                  instructionImage,
+                );
+                const fitted = await fitImageToRect(url, c.width, c.height);
+                childrenStage = childrenStage.map((cc, j) =>
+                  j === i
+                    ? { ...(cc as ImageChild), src: fitted, placeholder: false }
+                    : cc,
+                );
+                setPagePatch(pageId, { children: childrenStage });
+              } else {
+                const url = await generateColoringBookImage(instructionImage);
+                const fitted = await fitImageToRect(url, c.width, c.height);
+                childrenStage = childrenStage.map((cc, j) =>
+                  j === i
+                    ? { ...(cc as ImageChild), src: fitted, placeholder: false }
+                    : cc,
+                );
+                setPagePatch(pageId, { children: childrenStage });
+              }
+            } catch {
+              /* ignore individual failure */
+            }
+          }
+        }
+
+        // 3) Transform or generate the background
+        const baseUrl = page.originalImageUrl || page.imageUrl;
+        if (baseUrl) {
+          try {
+            const baseB64 = await blobUrlToPngBase64(baseUrl);
+            const rawUrl = await transformImageWithPrompt(
+              baseB64,
+              instructionImage,
+            );
+            const fitted = await fitImageToPrintableArea(rawUrl, page);
+            const prev = useEditorStore.getState().pages[pageId];
+            if (prev) {
+              revokeIfBlob(prev.originalImageUrl);
+              revokeIfBlob(prev.imageUrl);
+            }
+            setPagePatch(pageId, {
+              imageUrl: fitted,
+              originalImageUrl: fitted,
+            });
+          } catch {
+            // if transform fails, fall back to generate
+            try {
+              const rawUrl = await generateColoringBookImage(instructionImage);
+              const fitted = await fitImageToPrintableArea(rawUrl, page);
+              setPagePatch(pageId, {
+                imageUrl: fitted,
+                originalImageUrl: fitted,
+              });
+            } catch {
+              /* ignore */
+            }
+          }
+        } else {
+          try {
+            const rawUrl = await generateColoringBookImage(instructionImage);
+            const fitted = await fitImageToPrintableArea(rawUrl, page);
+            setPagePatch(pageId, {
+              imageUrl: fitted,
+              originalImageUrl: fitted,
+            });
+          } catch {
+            /* ignore */
+          }
+        }
+
+        setPagePatch(pageId, { generating: false, status: "" });
       } catch (err) {
         pushToast(
           (err as Error).message || "Failed to generate image",
@@ -865,25 +1041,101 @@ export default function Editor() {
         setPagePatch(pageId, { generating: false, status: "" });
       }
     },
-    [pagesIndex, buildInstruction],
+    [buildInstruction, setPagePatch],
   );
+
+  // Define branching after generateInto so dependencies are valid
+  const branchFromWithPrompt = useCallback(
+    async (parentId: string, prompt: string) => {
+      const parent = useEditorStore.getState().pages[parentId];
+      if (!parent) return;
+      const id = crypto.randomUUID();
+      const child: Page = {
+        ...parent,
+        id,
+        title: `${parent.title} variant`,
+        prompt,
+        generating: true,
+        status: "Generating…",
+        children: [...(parent.children || [])],
+        selectedChildId: null,
+      };
+      const parentNode = nodes.find((n) => n.id === parentId);
+      const newPos = parentNode
+        ? { x: parentNode.position.x, y: parentNode.position.y + 480 }
+        : { x: 0, y: 480 };
+      (actions as any).addEmptyPage?.(child);
+      setNodes((ns) => {
+        const cleared = ns.map((n) => ({ ...n, selected: false }));
+        const newNode: PageRFNode = {
+          id: child.id,
+          type: "page",
+          position: newPos,
+          dragHandle: ".dragHandlePage",
+          data: { pageId: child.id } as unknown as PageNodeData,
+        } as unknown as PageRFNode;
+        return cleared.concat({ ...newNode, selected: true });
+      });
+      setEdges((es) =>
+        es.concat({ id: crypto.randomUUID(), source: parentId, target: id }),
+      );
+      actions.setCurrentPage(id);
+      await generateInto(id, prompt, { ...parent, id, prompt });
+    },
+    [nodes, setNodes, setEdges, actions, generateInto],
+  );
+  useEffect(() => {
+    branchFromWithPromptRef.current = branchFromWithPrompt;
+  }, [branchFromWithPrompt]);
 
   const generateChildFromParent = useCallback(
     async (childId: string, parent: Page, prompt: string) => {
-      // If parent has an image, try transform with base; else generate new
-      const baseUrl = parent.originalImageUrl || parent.imageUrl;
-      // Draft child page object to avoid relying on asynchronous state updates
+      // If there are placeholders, generate into them on the child
+      const placeholders = (parent.children || []).filter(
+        (c) => c.type === "image" && !(c as ImageChild).src,
+      );
       const childDraft: Page = { ...parent, id: childId, prompt };
-      setPagePatch(childId, { generating: true, status: "Transforming…" });
+      if (placeholders.length) {
+        setPagePatch(childId, {
+          generating: true,
+          status: "Filling placeholders…",
+        });
+        // clone children array for child
+        setPagePatch(childId, { children: [...(parent.children || [])] });
+        const instruction = buildInstruction(childDraft, prompt, "image");
+        let childrenNext = [...(parent.children || [])];
+        for (let i = 0; i < childrenNext.length; i++) {
+          const c = childrenNext[i];
+          if (c.type === "image" && !(c as ImageChild).src) {
+            const url = await generateColoringBookImage(instruction);
+            childrenNext = childrenNext.map((cc, j) =>
+              j === i
+                ? { ...(cc as ImageChild), src: url, placeholder: false }
+                : cc,
+            );
+            setPagePatch(childId, { children: childrenNext });
+          }
+        }
+        setPagePatch(childId, { generating: false, status: "" });
+        return;
+      }
+
+      // Otherwise prefer transforming the flattened page background
+      const flattened = await flattenPageToPng(parent);
+      const baseUrl = flattened || parent.originalImageUrl || parent.imageUrl;
+      setPagePatch(childId, {
+        generating: true,
+        status: baseUrl ? "Transforming…" : "Generating…",
+      });
       if (baseUrl) {
         try {
           const baseB64 = await blobUrlToPngBase64(baseUrl);
-          const instruction = buildInstruction(childDraft, prompt);
+          const instruction = buildInstruction(childDraft, prompt, "image");
           const rawUrl = await transformImageWithPrompt(baseB64, instruction);
           const fitted = await fitImageToPrintableArea(rawUrl, childDraft);
-          const prev = pagesIndex.byId[childId];
-          revokeIfBlob(prev?.originalImageUrl); // avoid leaks from stale object URLs
-          revokeIfBlob(prev?.imageUrl); // avoid leaks from stale object URLs
+          const prev = useEditorStore.getState().pages[childId];
+          revokeIfBlob(prev?.originalImageUrl);
+          revokeIfBlob(prev?.imageUrl);
           setPagePatch(childId, {
             imageUrl: fitted,
             originalImageUrl: fitted,
@@ -896,10 +1148,9 @@ export default function Editor() {
           pushToast("Transform failed. Falling back to generate.", "error");
         }
       }
-      setPagePatch(childId, { generating: true, status: "Generating…" });
       await generateInto(childId, prompt, childDraft);
     },
-    [pagesIndex, buildInstruction, generateInto],
+    [buildInstruction, generateInto, setPagePatch],
   );
   useEffect(() => {
     generateChildFromParentRef.current = generateChildFromParent;
@@ -911,7 +1162,8 @@ export default function Editor() {
       // Find parents and children
       const incoming = edges.filter((e) => e.target === pageId);
       const outgoing = edges.filter((e) => e.source === pageId);
-      const parentId = incoming[0]?.source || pagesIndex.order[0]; // reattach to first parent, otherwise root
+      const order = useEditorStore.getState().order;
+      const parentId = incoming[0]?.source || order[0]; // reattach to first parent, otherwise root
       const newEdges: Edge[] = edges
         .filter((e) => e.source !== pageId && e.target !== pageId) // remove edges touching deleted
         .concat(
@@ -922,25 +1174,29 @@ export default function Editor() {
           })),
         );
       setEdges(newEdges);
-      setPagesIndex((s) => {
-        const byId = { ...s.byId } as Record<string, Page>;
-        delete byId[pageId];
-        const order = s.order.filter((id) => id !== pageId);
-        return { byId, order };
-      });
+      (actions as any).deletePage?.(pageId);
       setNodes((ns) => ns.filter((n) => n.id !== pageId));
-      if (currentPageId === pageId) setCurrentPageId(parentId!);
+      if (currentPageId === pageId) actions.setCurrentPage(parentId!);
     },
-    [edges, pagesIndex, currentPageId, setEdges, setNodes],
+    [edges, currentPageId, setEdges, setNodes, actions],
   );
   useEffect(() => {
     deleteNodeRef.current = deleteNode;
   }, [deleteNode]);
 
   // Keep node list in sync with page list (preserve selection)
+  const pagesIdsRef = useRef<string>("");
+  const lastCurrentPageIdRef = useRef<string | null>(null);
   useEffect(() => {
-    setNodes((old) =>
-      pages.map((p, i) => {
+    const idsSig = pages.map((p) => p.id).join("|");
+    const onlyContentChanged =
+      idsSig === pagesIdsRef.current &&
+      currentPageId === lastCurrentPageIdRef.current;
+    if (onlyContentChanged) return; // avoid calling setState every render
+    pagesIdsRef.current = idsSig;
+    lastCurrentPageIdRef.current = currentPageId;
+    setNodes((old) => {
+      const next = pages.map((p, i) => {
         const existing = old.find((n) => n.id === p.id);
         const pos = existing?.position || {
           x: (i % 3) * 380,
@@ -950,27 +1206,33 @@ export default function Editor() {
           id: p.id,
           type: "page",
           position: pos,
+          dragHandle: ".dragHandlePage",
           data: {
-            id: p.id,
-            title: p.title,
-            orientation: p.orientation,
-            marginInches: p.marginInches,
-            imageUrl: p.imageUrl,
-            loading: !!p.generating,
-            loadingText: p.status,
-            onBranch: (pid: string) => branchFromRef.current(pid),
-            onBranchWithPrompt: (pid: string, prompt: string) =>
-              branchFromWithPromptRef.current(pid, prompt),
-            onDelete: (pid: string) => deleteNodeRef.current(pid),
-            onQuickGenerate: (pid: string) => quickGenerateRef.current(pid),
-          },
-        };
-        return {
-          ...node,
+            pageId: p.id,
+            onBranch: (id: string) => branchFromRef.current(id),
+            onBranchWithPrompt: (id: string, prompt: string) =>
+              branchFromWithPromptRef.current(id, prompt),
+            onQuickGenerate: (id: string) => quickGenerateRef.current(id),
+            onDelete: (id: string) => deleteNodeRef.current(id),
+          } as unknown as PageNodeData,
           selected: existing?.selected ?? p.id === currentPageId,
-        };
-      }),
-    );
+        } as unknown as PageRFNode;
+        return node;
+      });
+      const equal =
+        old.length === next.length &&
+        old.every((o, idx) => {
+          const n = next[idx];
+          return (
+            o.id === n.id &&
+            o.selected === n.selected &&
+            o.position.x === n.position.x &&
+            o.position.y === n.position.y &&
+            (o.data as any).pageId === (n.data as any).pageId
+          );
+        });
+      return equal ? old : next;
+    });
   }, [pages, currentPageId, setNodes]);
 
   // Drop & paste handlers and keyboard shortcuts via hooks
@@ -1007,7 +1269,7 @@ export default function Editor() {
     });
     for (let i = 0; i < pagesToExport.length; i++) {
       const page = pagesToExport[i];
-      if (!page.imageUrl) continue;
+      if (!page.children?.length && !page.imageUrl) continue;
       if (i > 0) pdf.addPage("letter", page.orientation);
       try {
         await addPageToJsPdf(pdf, page);
@@ -1028,9 +1290,6 @@ export default function Editor() {
       >
         <div className="flex items-center gap-3">
           <span className="font-semibold">Checkfu</span>
-          <span className="text-sm text-slate-700">
-            personalized learning materials for kindergarteners
-          </span>
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -1040,7 +1299,7 @@ export default function Editor() {
             onClick={() => {
               const selected = nodes
                 .filter((n) => n.selected)
-                .map((n) => pagesIndex.byId[n.id])
+                .map((n) => useEditorStore.getState().pages[n.id])
                 .filter(Boolean) as Page[];
               const toExport = selected.length
                 ? selected
@@ -1095,12 +1354,47 @@ export default function Editor() {
         className="h-[calc(100vh-56px)] grid"
         style={{ gridTemplateColumns: "260px 1fr 320px" }}
       >
-        {/* Left sidebar (Pages only) */}
+        {/* Left sidebar (Pages and Palette) */}
         <aside
           className="border-r border-slate-200 bg-sky-50/30 flex flex-col"
           role="complementary"
           aria-label="Left sidebar"
         >
+          {/* Simple palette */}
+          <div className="p-2 border-b border-sky-100 flex items-center justify-between">
+            <div className="text-sm font-medium">Palette</div>
+          </div>
+          <div className="px-3 pt-2 pb-2 border-b border-slate-100 flex items-center gap-2">
+            <button
+              className="px-2 py-1 border rounded text-xs"
+              draggable
+              onDragStart={(e) => {
+                e.dataTransfer.setData(
+                  "application/checkfu-node",
+                  JSON.stringify({ kind: "text" }),
+                );
+              }}
+              title="Drag onto a page to create a Text node"
+            >
+              Text
+            </button>
+            <button
+              className="px-2 py-1 border rounded text-xs"
+              draggable
+              onDragStart={(e) => {
+                e.dataTransfer.setData(
+                  "application/checkfu-node",
+                  JSON.stringify({ kind: "image" }),
+                );
+              }}
+              title="Drag onto a page to create an Image node (opens file picker)"
+            >
+              Image
+            </button>
+            <div className="text-[11px] text-slate-600">
+              Or drop an image file onto a page
+            </div>
+          </div>
           <div className="p-2 border-b border-sky-100 flex items-center justify-between">
             <div className="text-sm font-medium">Pages</div>
             <button
@@ -1112,19 +1406,17 @@ export default function Editor() {
                   id,
                   title: "New Page",
                   orientation: "portrait",
-                  marginInches: DEFAULT_MARGIN_IN,
                   bwThreshold: DEFAULT_THRESHOLD,
                   pageType: "coloring",
                   coloringStyle: "classic",
                   standards: [],
                   systemPrompt: "",
                   systemPromptEdited: false,
+                  children: [],
+                  selectedChildId: null,
                 };
-                setPagesIndex((s) => ({
-                  byId: { ...s.byId, [id]: p },
-                  order: s.order.concat(id),
-                }));
-                setCurrentPageId(id);
+                (actions as any).addEmptyPage?.(p);
+                actions.setCurrentPage(p.id);
               }}
             >
               <svg
@@ -1189,6 +1481,7 @@ export default function Editor() {
                   );
                   const isSelected = selectedIds.has(p.id);
                   const isActive = currentPageId === p.id;
+                  const childCount = (p.children || []).length;
                   return (
                     <li key={p.id}>
                       <button
@@ -1198,7 +1491,7 @@ export default function Editor() {
                         aria-current={isActive ? "page" : undefined}
                         onClick={(e) => {
                           const isToggle = e.metaKey || e.ctrlKey;
-                          setCurrentPageId(p.id);
+                          actions.setCurrentPage(p.id);
                           if (isToggle) {
                             setNodes((ns) =>
                               ns.map((n) =>
@@ -1218,7 +1511,12 @@ export default function Editor() {
                         }}
                       >
                         <span className="flex items-center justify-between">
-                          <span className="truncate">{p.title}</span>
+                          <span className="truncate flex items-center gap-2">
+                            <span className="truncate">{p.title}</span>
+                            <span className="text-[10px] px-1 py-[1px] rounded bg-slate-200 text-slate-800">
+                              {childCount}
+                            </span>
+                          </span>
                           <span className="ml-2">
                             {isActive ? (
                               <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-100 text-blue-800 align-middle">
@@ -1232,6 +1530,42 @@ export default function Editor() {
                           </span>
                         </span>
                       </button>
+                      {/* Children (show when active page) */}
+                      {isActive && childCount > 0 ? (
+                        <ul className="ml-3 mt-1 mb-2 space-y-0.5">
+                          {(p.children || []).map((c) => (
+                            <li key={c.id}>
+                              <button
+                                className={`w-full px-2 py-1 rounded text-left hover:bg-slate-100 ${p.selectedChildId === c.id ? "bg-slate-100 ring-1 ring-slate-300" : ""}`}
+                                onClick={() => {
+                                  actions.setCurrentPage(p.id);
+                                  setPagePatch(p.id, { selectedChildId: c.id });
+                                  setNodes((ns) =>
+                                    ns.map((n) => ({
+                                      ...n,
+                                      selected: n.id === p.id,
+                                    })),
+                                  );
+                                }}
+                              >
+                                <span className="flex items-center gap-2 text-xs text-slate-700">
+                                  <span
+                                    className="inline-block w-3 h-3 rounded-sm border border-slate-300 bg-white"
+                                    aria-hidden
+                                  />
+                                  <span className="truncate">
+                                    {c.type === "text"
+                                      ? `Text: ${((c as TextChild).text || "").slice(0, 24)}`
+                                      : (c as ImageChild).src
+                                        ? "Image"
+                                        : "Image (placeholder)"}
+                                  </span>
+                                </span>
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : null}
                     </li>
                   );
                 })}
@@ -1247,19 +1581,16 @@ export default function Editor() {
               nodes={nodes}
               edges={edges}
               fitView
-              fitViewOptions={{ padding: 0.22 }}
-              defaultViewport={{ x: 0, y: 0, zoom: 0.72 }}
+              fitViewOptions={RF_FIT_VIEW_OPTIONS}
+              defaultViewport={RF_DEFAULT_VIEWPORT}
               minZoom={0.05}
               maxZoom={2.5}
-              translateExtent={[
-                [-100000, -100000],
-                [100000, 100000],
-              ]}
+              translateExtent={RF_TRANSLATE_EXTENT}
               nodeTypes={nodeTypes}
-              onNodesChange={handleNodesChange}
+              onNodesChange={onNodesChange}
               onEdgesChange={onEdgesChange}
-              onNodeClick={(_, n) => setCurrentPageId(n.id)}
-              onConnect={(c: Connection) => setEdges((es) => addEdge(c, es))}
+              onNodeClick={onNodeClickStable}
+              onConnect={onConnectStable}
               noPanClassName="nopan"
               noDragClassName="nodrag"
               noWheelClassName="nowheel"
@@ -1270,7 +1601,7 @@ export default function Editor() {
           </div>
         </main>
 
-        {/* Inspector */}
+        {/* Inspector with Layers and Properties */}
         <aside
           className="border-l border-slate-200 bg-sky-50/30 p-3 overflow-auto"
           aria-label="Inspector"
@@ -1281,240 +1612,529 @@ export default function Editor() {
             </div>
           ) : (
             <div className="space-y-6 text-sm">
-              {/* Page Type & Styles */}
-              <section>
-                <h3 className="text-sm font-semibold text-slate-700">
-                  Type & Style
-                </h3>
-                <div className="mt-2 grid gap-2">
-                  <div className="flex items-center gap-3">
-                    <label className="flex items-center gap-1 text-sm">
-                      <input
-                        type="radio"
-                        name="pagetype"
-                        checked={
-                          (currentPage?.pageType || "coloring") === "coloring"
-                        }
-                        onChange={() =>
-                          setPagePatch(currentPageId!, { pageType: "coloring" })
-                        }
-                      />
-                      Coloring Book
-                    </label>
-                    <label className="flex items-center gap-1 text-sm">
-                      <input
-                        type="radio"
-                        name="pagetype"
-                        checked={
-                          (currentPage?.pageType || "coloring") === "worksheet"
-                        }
-                        onChange={() =>
-                          setPagePatch(currentPageId!, {
-                            pageType: "worksheet",
-                          })
-                        }
-                      />
-                      Worksheet (beta)
-                    </label>
-                  </div>
-                  {(currentPage?.pageType ?? "coloring") === "coloring" ? (
-                    <div className="grid gap-1">
-                      <label htmlFor="coloring-style">Style</label>
-                      <select
-                        id="coloring-style"
-                        className="border rounded px-2 py-1"
-                        value={currentPage?.coloringStyle || "classic"}
-                        onChange={(e) =>
-                          setPagePatch(currentPageId!, {
-                            coloringStyle: e.target
-                              .value as Page["coloringStyle"],
-                          })
-                        }
-                      >
-                        <option value="classic">Classic</option>
-                        <option value="anime">Anime</option>
-                        <option value="retro">Retro</option>
-                      </select>
-                    </div>
-                  ) : null}
-                </div>
-              </section>
-
-              <section>
-                <h3 className="text-sm font-semibold text-slate-700">Page</h3>
-                <div className="mt-2 grid gap-2">
-                  <label htmlFor="page-title">Title</label>
-                  <input
-                    id="page-title"
-                    className="border rounded px-2 py-1"
-                    value={currentPage?.title || ""}
-                    onChange={(e) =>
-                      setPagePatch(currentPageId!, { title: e.target.value })
-                    }
-                  />
-                  <label htmlFor="page-orientation">Orientation</label>
-                  <select
-                    id="page-orientation"
-                    className="border rounded px-2 py-1"
-                    value={currentPage?.orientation || "portrait"}
-                    onChange={(e) =>
-                      setPagePatch(currentPageId!, {
-                        orientation: e.target.value as Orientation,
-                      })
-                    }
-                  >
-                    <option value="portrait">Portrait</option>
-                    <option value="landscape">Landscape</option>
-                  </select>
-                  <label htmlFor="page-margin">Margin (inches)</label>
-                  <input
-                    id="page-margin"
-                    type="number"
-                    min={0.25}
-                    max={1.5}
-                    step={0.25}
-                    className="border rounded px-2 py-1"
-                    value={currentPage?.marginInches ?? 0.5}
-                    onChange={(e) =>
-                      setPagePatch(currentPageId!, {
-                        marginInches: parseFloat(e.target.value || "0.5"),
-                      })
-                    }
-                  />
-                </div>
-              </section>
-
-              {/* Standards (K only) for worksheets */}
-              {(currentPage?.pageType || "worksheet") === "worksheet" ? (
+              {!currentPage.selectedChildId && (
                 <section>
-                  <h3 className="text-sm font-semibold text-slate-700">
-                    Standards (K)
-                  </h3>
+                  <h3 className="text-sm font-semibold text-slate-700">Page</h3>
                   <div className="mt-2 grid gap-2">
+                    <label htmlFor="page-title">Title</label>
                     <input
-                      type="text"
-                      placeholder="Search (e.g., K.OA or count)"
-                      className="border rounded px-2 py-1 text-sm"
-                      onChange={(e) => {
-                        const q = e.currentTarget.value.toLowerCase();
-                        const sel = document.getElementById(
-                          "k-standards-select",
-                        ) as HTMLSelectElement | null;
-                        if (sel) {
-                          sel.dataset.filter = q;
-                          sel.dispatchEvent(new Event("rebuild"));
-                        }
-                      }}
-                    />
-                    <StandardsMultiSelect
-                      id="k-standards-select"
-                      options={standardsCatalog}
-                      value={currentPage?.standards || []}
-                      onChange={(vals) =>
-                        setPagePatch(currentPageId!, {
-                          standards: vals,
-                          systemPromptEdited: false,
-                        })
+                      id="page-title"
+                      className="border rounded px-2 py-1"
+                      value={currentPage?.title || ""}
+                      onChange={(e) =>
+                        setPagePatch(currentPageId!, { title: e.target.value })
                       }
                     />
-                    <div className="text-xs text-muted-foreground">
-                      Selected:{" "}
-                      {(currentPage?.standards || []).join(", ") || "None"}
-                    </div>
+                    <label htmlFor="page-orientation">Orientation</label>
+                    <select
+                      id="page-orientation"
+                      className="border rounded px-2 py-1"
+                      value={currentPage?.orientation || "portrait"}
+                      onChange={(e) =>
+                        setPagePatch(currentPageId!, {
+                          orientation: e.target.value as Orientation,
+                        })
+                      }
+                    >
+                      <option value="portrait">Portrait</option>
+                      <option value="landscape">Landscape</option>
+                    </select>
+                    {/* Margin removed per spec */}
                   </div>
+                </section>
+              )}
+
+              {/* Page prompts removed: prompting is node-only */}
+
+              {/* Child inspector only when a child is selected */}
+              {currentPage.selectedChildId ? (
+                <section>
+                  {(() => {
+                    const ch = (currentPage.children || []).find(
+                      (c) => c.id === currentPage.selectedChildId,
+                    );
+                    const hdr = ch?.type === "text" ? "Text" : "Image";
+                    return (
+                      <h3 className="text-sm font-semibold text-slate-700">
+                        {hdr}
+                      </h3>
+                    );
+                  })()}
+                  {(() => {
+                    const child = (currentPage.children || []).find(
+                      (c) => c.id === currentPage.selectedChildId,
+                    );
+                    if (!child) return null;
+                    const isText = child.type === "text";
+                    return (
+                      <div className="grid gap-2">
+                        <div className="grid grid-cols-2 gap-2 items-center">
+                          <label className="text-xs">X</label>
+                          <input
+                            className="border rounded px-2 py-1"
+                            type="number"
+                            value={child.x}
+                            onChange={(e) => {
+                              const v = parseFloat(
+                                e.currentTarget.value || "0",
+                              );
+                              setPagePatch(currentPageId!, {
+                                children: (currentPage.children || []).map(
+                                  (c) =>
+                                    c.id === child.id ? { ...c, x: v } : c,
+                                ),
+                              });
+                            }}
+                          />
+                          <label className="text-xs">Y</label>
+                          <input
+                            className="border rounded px-2 py-1"
+                            type="number"
+                            value={child.y}
+                            onChange={(e) => {
+                              const v = parseFloat(
+                                e.currentTarget.value || "0",
+                              );
+                              setPagePatch(currentPageId!, {
+                                children: (currentPage.children || []).map(
+                                  (c) =>
+                                    c.id === child.id ? { ...c, y: v } : c,
+                                ),
+                              });
+                            }}
+                          />
+                          <label className="text-xs">Width</label>
+                          <input
+                            className="border rounded px-2 py-1"
+                            type="number"
+                            disabled={isText}
+                            title={
+                              isText ? "Width snaps to text content" : undefined
+                            }
+                            value={child.width}
+                            onChange={(e) => {
+                              const v = parseFloat(
+                                e.currentTarget.value || "0",
+                              );
+                              setPagePatch(currentPageId!, {
+                                children: (currentPage.children || []).map(
+                                  (c) =>
+                                    c.id === child.id ? { ...c, width: v } : c,
+                                ),
+                              });
+                            }}
+                          />
+                          <label className="text-xs">Height</label>
+                          <input
+                            className="border rounded px-2 py-1"
+                            type="number"
+                            disabled={isText}
+                            title={
+                              isText
+                                ? "Height snaps to text content"
+                                : undefined
+                            }
+                            value={child.height}
+                            onChange={(e) => {
+                              const v = parseFloat(
+                                e.currentTarget.value || "0",
+                              );
+                              setPagePatch(currentPageId!, {
+                                children: (currentPage.children || []).map(
+                                  (c) =>
+                                    c.id === child.id ? { ...c, height: v } : c,
+                                ),
+                              });
+                            }}
+                          />
+                          <label className="text-xs">Angle</label>
+                          <input
+                            className="border rounded px-2 py-1"
+                            type="number"
+                            value={child.angle || 0}
+                            onChange={(e) => {
+                              const v = parseFloat(
+                                e.currentTarget.value || "0",
+                              );
+                              setPagePatch(currentPageId!, {
+                                children: (currentPage.children || []).map(
+                                  (c) =>
+                                    c.id === child.id ? { ...c, angle: v } : c,
+                                ),
+                              });
+                            }}
+                          />
+                        </div>
+
+                        {/* Prompt Library (node-local selection; default None) */}
+                        <div className="grid gap-1">
+                          <label htmlFor="prompt-preset">Prompt Library</label>
+                          <select
+                            id="prompt-preset"
+                            className="border rounded px-2 py-1"
+                            value={nodePresets[child.id] ?? "none"}
+                            onChange={(e) => {
+                              const v = e.currentTarget.value;
+                              setNodePresets((m) => ({ ...m, [child.id]: v }));
+                              if (v === "none") return;
+                              const [type, style] = v.includes(":")
+                                ? v.split(":")
+                                : [v, ""];
+                              const simulated: Page = {
+                                ...currentPage!,
+                                pageType: type as Page["pageType"],
+                                coloringStyle:
+                                  (style as Page["coloringStyle"]) ||
+                                  currentPage.coloringStyle,
+                              } as Page;
+                              const sys = computeSystemPrompt(
+                                simulated,
+                                standardsCatalog,
+                              );
+                              setNodePrompts((m) => ({
+                                ...m,
+                                [child.id]: sys,
+                              }));
+                            }}
+                          >
+                            <option value="none">None</option>
+                            <option value={"coloring:classic"}>
+                              Coloring Book — Classic
+                            </option>
+                            <option value={"coloring:anime"}>
+                              Coloring Book — Anime
+                            </option>
+                            <option value={"coloring:retro"}>
+                              Coloring Book — Retro
+                            </option>
+                            <option value={"worksheet"}>
+                              Worksheet — K Math
+                            </option>
+                          </select>
+                        </div>
+                        {/* Compact Knowledge picker (standards) */}
+                        <div className="grid gap-1">
+                          <label>Knowledge (Standards)</label>
+                          <CompactStandardsPicker
+                            options={standardsCatalog}
+                            value={currentPage?.standards || []}
+                            onChange={(vals) =>
+                              setPagePatch(currentPageId!, {
+                                standards: vals,
+                                systemPromptEdited: false,
+                              })
+                            }
+                          />
+                        </div>
+                        {child.type === "text" ? (
+                          <div className="grid gap-3">
+                            <div className="grid grid-cols-2 gap-2 items-center">
+                              <label className="text-xs">Text</label>
+                              <input
+                                className="border rounded px-2 py-1"
+                                value={(child as TextChild).text || ""}
+                                onChange={(e) =>
+                                  setPagePatch(currentPageId!, {
+                                    children: (currentPage.children || []).map(
+                                      (c) =>
+                                        c.id === child.id
+                                          ? {
+                                              ...(c as TextChild),
+                                              text: e.currentTarget.value,
+                                            }
+                                          : c,
+                                    ),
+                                  })
+                                }
+                              />
+                              <label className="text-xs">Font Size</label>
+                              <input
+                                className="border rounded px-2 py-1"
+                                type="number"
+                                value={(child as TextChild).fontSize || 24}
+                                onChange={(e) =>
+                                  setPagePatch(currentPageId!, {
+                                    children: (currentPage.children || []).map(
+                                      (c) =>
+                                        c.id === child.id
+                                          ? {
+                                              ...(c as TextChild),
+                                              fontSize: parseFloat(
+                                                e.currentTarget.value || "24",
+                                              ),
+                                            }
+                                          : c,
+                                    ),
+                                  })
+                                }
+                              />
+                              <label className="text-xs">Align</label>
+                              <select
+                                className="border rounded px-2 py-1"
+                                value={(child as TextChild).align || "left"}
+                                onChange={(e) =>
+                                  setPagePatch(currentPageId!, {
+                                    children: (currentPage.children || []).map(
+                                      (c) =>
+                                        c.id === child.id
+                                          ? {
+                                              ...(c as TextChild),
+                                              align: e.currentTarget
+                                                .value as TextChild["align"],
+                                            }
+                                          : c,
+                                    ),
+                                  })
+                                }
+                              >
+                                <option value="left">Left</option>
+                                <option value="center">Center</option>
+                                <option value="right">Right</option>
+                              </select>
+                            </div>
+                            {/* Prompt for text */}
+                            <div className="grid gap-1">
+                              <label htmlFor="quick-prompt-text">Prompt</label>
+                              <textarea
+                                id="quick-prompt-text"
+                                className="border rounded px-2 py-1 h-24"
+                                placeholder="e.g., write 5 sentences about shapes"
+                                value={nodePrompts[child.id] ?? ""}
+                                onChange={(e) =>
+                                  setNodePrompts((m) => ({
+                                    ...m,
+                                    [child.id]: e.target.value,
+                                  }))
+                                }
+                              />
+                              <button
+                                className="px-2 py-1 border rounded disabled:opacity-50 w-max"
+                                disabled={generatingAny}
+                                onClick={async () => {
+                                  const promptText = (
+                                    nodePrompts[child.id] ?? ""
+                                  ).trim();
+                                  try {
+                                    setPagePatch(currentPageId!, {
+                                      generating: true,
+                                      status: "Generating text…",
+                                    });
+                                    const textPrompt = [
+                                      buildInstruction(
+                                        currentPage!,
+                                        promptText,
+                                        "text",
+                                      ),
+                                      "You are updating a single text label on a printable page.",
+                                      "Return only the new text, no commentary.",
+                                      `Current text: "${(child as TextChild).text || ""}"`,
+                                    ].join("\n");
+                                    const out =
+                                      await generateTextContent(textPrompt);
+                                    const label = cleanSingleLineLabel(out);
+                                    setPagePatch(currentPageId!, {
+                                      children: (
+                                        currentPage?.children || []
+                                      ).map((c) =>
+                                        c.id === child.id
+                                          ? { ...(c as TextChild), text: label }
+                                          : c,
+                                      ),
+                                      generating: false,
+                                      status: "",
+                                    });
+                                  } catch (err) {
+                                    setPagePatch(currentPageId!, {
+                                      generating: false,
+                                      status: "",
+                                    });
+                                    pushToast(
+                                      (err as Error)?.message ||
+                                        "Failed to generate text",
+                                      "error",
+                                    );
+                                  }
+                                }}
+                              >
+                                {generatingAny ? "Generating…" : "Generate"}
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="grid gap-3">
+                            {/* Prompt for image */}
+                            <div className="grid gap-1">
+                              <label htmlFor="quick-prompt-image">Prompt</label>
+                              <textarea
+                                id="quick-prompt-image"
+                                className="border rounded px-2 py-1 h-24"
+                                placeholder="Describe the change to this image"
+                                value={nodePrompts[child.id] ?? ""}
+                                onChange={(e) =>
+                                  setNodePrompts((m) => ({
+                                    ...m,
+                                    [child.id]: e.target.value,
+                                  }))
+                                }
+                              />
+                            </div>
+                            <div className="text-xs text-slate-600">
+                              {(child as ImageChild).src
+                                ? "Image set"
+                                : "Placeholder image (X)"}
+                            </div>
+                            <div className="flex gap-2">
+                              <button
+                                className="px-2 py-1 border rounded text-xs"
+                                onClick={() => {
+                                  const input = document.createElement("input");
+                                  input.type = "file";
+                                  input.accept = "image/*";
+                                  input.onchange = () => {
+                                    const file = input.files?.[0];
+                                    if (!file) return;
+                                    const url = URL.createObjectURL(file);
+                                    const next = (
+                                      currentPage.children || []
+                                    ).map((c) =>
+                                      c.id === child.id
+                                        ? {
+                                            ...(c as ImageChild),
+                                            src: url,
+                                            placeholder: false,
+                                          }
+                                        : c,
+                                    );
+                                    // revoke old blob if present
+                                    const old = (child as ImageChild).src;
+                                    if (old && old.startsWith("blob:")) {
+                                      try {
+                                        URL.revokeObjectURL(old);
+                                      } catch {}
+                                    }
+                                    setPagePatch(currentPageId!, {
+                                      children: next,
+                                    });
+                                  };
+                                  input.click();
+                                }}
+                              >
+                                Upload Image
+                              </button>
+                              <button
+                                className="px-2 py-1 border rounded text-xs"
+                                onClick={async () => {
+                                  try {
+                                    setPagePatch(currentPageId!, {
+                                      generating: true,
+                                      status: "Generating image…",
+                                    });
+                                    const instruction = buildInstruction(
+                                      currentPage!,
+                                      nodePrompts[child.id] ?? "",
+                                      "image",
+                                    );
+                                    const ic = child as ImageChild;
+                                    let url: string;
+                                    if (ic.src) {
+                                      const b64 = await blobUrlToPngBase64(
+                                        ic.src,
+                                      );
+                                      url = await transformImageWithPrompt(
+                                        b64,
+                                        instruction,
+                                      );
+                                    } else {
+                                      url =
+                                        await generateColoringBookImage(
+                                          instruction,
+                                        );
+                                    }
+                                    // Fit generated image to this node's rectangle (trim borders, preserve aspect)
+                                    const fitted = await fitImageToRect(
+                                      url,
+                                      child.width,
+                                      child.height,
+                                    );
+                                    const next = (
+                                      currentPage.children || []
+                                    ).map((c) =>
+                                      c.id === child.id
+                                        ? {
+                                            ...(c as ImageChild),
+                                            src: fitted,
+                                            placeholder: false,
+                                          }
+                                        : c,
+                                    );
+                                    setPagePatch(currentPageId!, {
+                                      children: next,
+                                      generating: false,
+                                      status: "",
+                                    });
+                                  } catch (err) {
+                                    setPagePatch(currentPageId!, {
+                                      generating: false,
+                                      status: "",
+                                    });
+                                    pushToast(
+                                      (err as Error)?.message ||
+                                        "Failed to generate image",
+                                      "error",
+                                    );
+                                  }
+                                }}
+                              >
+                                Generate
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </section>
               ) : null}
 
-              {/* Prompts */}
-              <section>
-                <h3 className="text-sm font-semibold text-slate-700">
-                  Prompts
-                </h3>
-                <div className="mt-2 grid gap-3 text-sm">
-                  <div className="grid gap-1">
-                    <label htmlFor="sys-prompt">System Prompt</label>
-                    <textarea
-                      id="sys-prompt"
-                      className="border rounded px-2 py-1 h-24"
-                      placeholder="Base instructions"
-                      value={
-                        currentPage
-                          ? getEffectiveSystemPrompt(
-                              currentPage,
-                              standardsCatalog,
-                            )
-                          : ""
-                      }
-                      onChange={(e) =>
+              {/* Import (page only) */}
+              {!currentPage.selectedChildId && (
+                <section>
+                  <h3 className="text-sm font-medium text-muted-foreground">
+                    Import
+                  </h3>
+                  <div className="mt-2 grid gap-2">
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={(e) => {
+                        const f = e.currentTarget.files?.[0];
+                        if (!f) return;
+                        if (f.size > 8 * 1024 * 1024) {
+                          pushToast("File too large (max 8 MB)", "error");
+                          return;
+                        }
+                        const url = URL.createObjectURL(f);
+                        const prev = currentPageId
+                          ? useEditorStore.getState().pages[currentPageId]
+                          : undefined;
+                        revokeIfBlob(prev?.originalImageUrl); // avoid leaks from stale object URLs
+                        revokeIfBlob(prev?.imageUrl); // avoid leaks from stale object URLs
                         setPagePatch(currentPageId!, {
-                          systemPrompt: e.target.value,
-                          systemPromptEdited: true,
-                        })
-                      }
+                          originalImageUrl: url,
+                          imageUrl: url,
+                        });
+                        void applyThreshold(
+                          currentPageId!,
+                          (currentPageId
+                            ? useEditorStore.getState().pages[currentPageId!]
+                                ?.bwThreshold
+                            : undefined) ?? DEFAULT_THRESHOLD,
+                        );
+                      }}
                     />
                   </div>
-                  <div className="grid gap-1">
-                    <label htmlFor="gen-prompt">Prompt</label>
-                    <textarea
-                      id="gen-prompt"
-                      className="border rounded px-2 py-1 h-24"
-                      placeholder="Extra instructions"
-                      value={currentPage?.prompt || ""}
-                      onChange={(e) =>
-                        setPagePatch(currentPageId!, { prompt: e.target.value })
-                      }
-                    />
-                  </div>
-                  <button
-                    className="px-2 py-1 border rounded disabled:opacity-50 w-max"
-                    disabled={generatingAny}
-                    onClick={async () => {
-                      const promptText = (currentPage?.prompt || "").trim();
-                      await generateInto(currentPageId!, promptText);
-                    }}
-                  >
-                    {generatingAny ? "Generating…" : "Generate"}
-                  </button>
-                  {/* Inpainting moved to its own modal/section */}
-                </div>
-              </section>
-
-              {/* Import */}
-              <section>
-                <h3 className="text-sm font-medium text-muted-foreground">
-                  Import
-                </h3>
-                <div className="mt-2 grid gap-2">
-                  <input
-                    type="file"
-                    accept="image/*"
-                    onChange={(e) => {
-                      const f = e.currentTarget.files?.[0];
-                      if (!f) return;
-                      if (f.size > 8 * 1024 * 1024) {
-                        pushToast("File too large (max 8 MB)", "error");
-                        return;
-                      }
-                      const url = URL.createObjectURL(f);
-                      const prev = currentPageId
-                        ? pagesIndex.byId[currentPageId]
-                        : undefined;
-                      revokeIfBlob(prev?.originalImageUrl); // avoid leaks from stale object URLs
-                      revokeIfBlob(prev?.imageUrl); // avoid leaks from stale object URLs
-                      setPagePatch(currentPageId!, {
-                        originalImageUrl: url,
-                        imageUrl: url,
-                      });
-                      void applyThreshold(
-                        currentPageId!,
-                        (currentPageId
-                          ? pagesIndex.byId[currentPageId]?.bwThreshold
-                          : undefined) ?? DEFAULT_THRESHOLD,
-                      );
-                    }}
-                  />
-                </div>
-              </section>
+                </section>
+              )}
             </div>
           )}
         </aside>
@@ -1644,62 +2264,81 @@ export default function Editor() {
 /**
  * Module: StandardsMultiSelect — compact multi-select with simple search
  */
-function StandardsMultiSelect({
-  id,
+// Old tall standards picker removed; using CompactStandardsPicker above.
+
+// Compact, low-height standards picker with suggestions
+function CompactStandardsPicker({
   options,
   value,
   onChange,
 }: {
-  id: string;
   options: { code: string; description: string }[];
   value: string[];
   onChange: (vals: string[]) => void;
 }) {
-  const selectRef = useRef<HTMLSelectElement | null>(null);
-  useEffect(() => {
-    const sel = selectRef.current;
-    if (!sel) return;
-    const onRebuild = () => {
-      const q = (sel.dataset.filter || "").toLowerCase();
-      const filtered = q
-        ? options.filter(
-            (o) =>
-              o.code.toLowerCase().includes(q) ||
-              (o.description || "").toLowerCase().includes(q),
-          )
-        : options;
-      // Rebuild options list
-      while (sel.firstChild) sel.removeChild(sel.firstChild);
-      for (const o of filtered) {
-        const opt = document.createElement("option");
-        opt.value = o.code;
-        const desc =
-          (o.description || "").length > 64
-            ? o.description.slice(0, 61) + "…"
-            : o.description || "";
-        opt.textContent = `${o.code} — ${desc}`;
-        opt.selected = value.includes(o.code);
-        sel.appendChild(opt);
-      }
-    };
-    onRebuild();
-    sel.addEventListener("rebuild", onRebuild as EventListener);
-    return () => sel.removeEventListener("rebuild", onRebuild as EventListener);
-  }, [options, value, selectRef]);
-
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const addByCode = (code: string) => {
+    const normalized = code.trim();
+    if (!normalized) return;
+    const exists = options.some(
+      (o) => o.code.toLowerCase() === normalized.toLowerCase(),
+    );
+    const picked = exists
+      ? options.find((o) => o.code.toLowerCase() === normalized.toLowerCase())!
+          .code
+      : options.find((o) =>
+          (o.description || "")
+            .toLowerCase()
+            .includes(normalized.toLowerCase()),
+        )?.code;
+    if (!picked) return;
+    if (!value.includes(picked)) onChange([...value, picked]);
+    if (inputRef.current) inputRef.current.value = "";
+  };
   return (
-    <select
-      id={id}
-      ref={selectRef}
-      multiple
-      size={8}
-      className="border rounded px-2 py-1 text-sm h-[172px] overflow-auto"
-      onChange={(e) => {
-        const vals = Array.from(e.currentTarget.selectedOptions).map(
-          (o) => o.value,
-        );
-        onChange(vals);
-      }}
-    />
+    <div className="grid gap-1">
+      <div className="flex items-center gap-2">
+        <input
+          ref={inputRef}
+          list="k-standards-datalist"
+          placeholder="Add standard (e.g., K.OA.1)"
+          className="border rounded px-2 py-1 text-sm flex-1"
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              addByCode((e.currentTarget as HTMLInputElement).value || "");
+            }
+          }}
+        />
+        <button
+          className="px-2 py-1 border rounded text-xs"
+          onClick={() => addByCode(inputRef.current?.value || "")}
+        >
+          Add
+        </button>
+      </div>
+      <datalist id="k-standards-datalist">
+        {options.slice(0, 400).map((o) => (
+          <option key={o.code} value={o.code} label={o.description} />
+        ))}
+      </datalist>
+      <div className="flex flex-wrap gap-1">
+        {value.map((code) => (
+          <span
+            key={code}
+            className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[11px] rounded bg-slate-200"
+          >
+            {code}
+            <button
+              className="ml-1 text-slate-600 hover:text-slate-900"
+              onClick={() => onChange(value.filter((v) => v !== code))}
+              aria-label={`Remove ${code}`}
+            >
+              ×
+            </button>
+          </span>
+        ))}
+      </div>
+    </div>
   );
 }

@@ -12,12 +12,10 @@ type Orientation = "portrait" | "landscape";
 
 export default function PagePreview({
   orientation,
-  marginInches,
   imageUrl,
   ariaLabel,
 }: {
   orientation: Orientation;
-  marginInches: number;
   imageUrl?: string;
   ariaLabel?: string;
 }) {
@@ -28,8 +26,6 @@ export default function PagePreview({
     return { w: Math.round(wIn * DPI), h: Math.round(hIn * DPI) };
   }, [orientation]);
 
-  const m = Math.round(marginInches * DPI);
-
   return (
     <div
       className="relative bg-white"
@@ -39,15 +35,10 @@ export default function PagePreview({
       {/* Background */}
       <div className="absolute inset-0" />
 
-      {/* Inner margin area */}
+      {/* Image area (full page, no enforced margins) */}
       <div
         className="absolute overflow-hidden relative"
-        style={{
-          left: m + 1,
-          top: m + 1,
-          width: Math.max(0, dims.w - 2 * m - 2),
-          height: Math.max(0, dims.h - 2 * m - 2),
-        }}
+        style={{ left: 1, top: 1, width: dims.w - 2, height: dims.h - 2 }}
       >
         {imageUrl ? (
           <Image
@@ -55,7 +46,7 @@ export default function PagePreview({
             alt="Page image"
             fill
             sizes="100vw"
-            style={{ objectFit: 'contain' }}
+            style={{ objectFit: "contain" }}
             priority
           />
         ) : (
@@ -65,17 +56,7 @@ export default function PagePreview({
         )}
       </div>
 
-      {/* Safe margin dashed rectangle */}
-      <div
-        className="absolute border border-dashed border-slate-300/70 pointer-events-none"
-        style={{
-          left: m + 1,
-          top: m + 1,
-          width: Math.max(0, dims.w - 2 * m - 2),
-          height: Math.max(0, dims.h - 2 * m - 2),
-        }}
-        aria-hidden
-      />
+      {/* No safe margin overlay */}
     </div>
   );
 }

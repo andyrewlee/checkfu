@@ -22,25 +22,42 @@ body {
   background-image:
     radial-gradient(circle at 1px 1px, var(--paper-line) 1px, transparent 1px),
     radial-gradient(circle at 1px 1px, var(--paper-line) 1px, transparent 1px);
-  background-size: 20px 20px, 20px 20px;
-  background-position: 0 0, 10px 10px;
+  background-size:
+    20px 20px,
+    20px 20px;
+  background-position:
+    0 0,
+    10px 10px;
 }
 
 /* Card-like containers stand out from the lined background */
-.bg-background { background-color: #fff !important; }
+.bg-background {
+  background-color: #fff !important;
+}
 
 /* Print CSS for letter paper */
 @media print {
-  @page { size: 8.5in 11in; margin: 1in; }
-  html, body { width: 8.5in; height: 11in; }
-  .no-print { display: none !important; }
+  @page {
+    size: 8.5in 11in;
+    margin: 0;
+  }
+  html,
+  body {
+    width: 8.5in;
+    height: 11in;
+  }
+  .no-print {
+    display: none !important;
+  }
 }
 
 /* Ensure React Flow NodeToolbar is interactive even though viewport uses pointer-events: none */
-.react-flow__node-toolbar { pointer-events: all; }
+.react-flow__node-toolbar {
+  pointer-events: all;
+}
 
 /* XYFlow subtle line/color tuning */
 .react-flow {
-  --xy-edge-stroke-default: #cbd5e1;        /* slate-300 */
-  --xy-node-border: 1px solid #e2e8f0;      /* slate-200 */
+  --xy-edge-stroke-default: #cbd5e1; /* slate-300 */
+  --xy-node-border: 1px solid #e2e8f0; /* slate-200 */
 }
