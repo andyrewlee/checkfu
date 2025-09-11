@@ -371,7 +371,7 @@ export default function PageCanvasFabric(props: Props) {
       await hydrate(canvas, items);
       canvas.requestRenderAll();
     });
-  }, [items]);
+  }, [items, withHydration]);
 
   // programmatic selection from store (fenced)
   useEffect(() => {
@@ -392,7 +392,7 @@ export default function PageCanvasFabric(props: Props) {
       }
       canvas.requestRenderAll();
     });
-  }, [selectedChildId, items]);
+  }, [selectedChildId, items, withHydration]);
 
   return (
     <canvas
