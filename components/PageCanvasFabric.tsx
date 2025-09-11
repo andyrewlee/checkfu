@@ -4,6 +4,7 @@
 import { useEffect, useMemo, useRef } from "react";
 import type { TextChild, ImageChild } from "@/store/useEditorStore";
 import { pagePx } from "@/lib/image/pageMetrics";
+import { useHydrationFence } from "@/hooks/useHydrationFence";
 
 type Props = {
   pageId: string;
@@ -26,17 +27,7 @@ export default function PageCanvasFabric(props: Props) {
   const canvasElRef = useRef<HTMLCanvasElement | null>(null);
   const fabricRef = useRef<any | null>(null);
   const textChangeTimerRef = useRef<number | null>(null);
-  // Hydration fence: suppress commits/selection propagation during programmatic updates
-  const hydratingRef = useRef<number>(0);
-  const isHydrating = () => hydratingRef.current > 0;
-  const withHydration = async <T,>(fn: () => Promise<T> | T): Promise<T> => {
-    hydratingRef.current++;
-    try {
-      return await fn();
-    } finally {
-      hydratingRef.current--;
-    }
-  };
+  const { isHydrating, withHydration } = useHydrationFence();
   // Keep latest items for event handlers (avoid stale closures on undo/redo)
   const itemsLatestRef = useRef<(TextChild | ImageChild)[]>(items);
   itemsLatestRef.current = items;
