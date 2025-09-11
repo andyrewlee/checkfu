@@ -100,14 +100,6 @@ const RF_TRANSLATE_EXTENT: [[number, number], [number, number]] = [
  * Module: Image utilities — fit, trim, threshold, base64
  */
 
-// blobUrlToPngBase64 moved to lib/image/bitmap
-
-// fitImageToPrintableArea moved to lib/image/bitmap
-
-// Trim white borders and fit an image into a target rectangle (node) while preserving aspect.
-// No extra padding is added; any remaining gap is due to aspect mismatch.
-// fitImageToRect moved to lib/image/bitmap
-
 // Ensure model output for text nodes is a single clean label (no markdown or reasoning)
 function cleanSingleLineLabel(s: string): string {
   if (!s) return "";
@@ -127,12 +119,9 @@ function cleanSingleLineLabel(s: string): string {
   return t;
 }
 
-// thresholdToDataUrl moved to lib/image/bitmap
-
 /**
  * Module: Standards loader — flatten CCSS Kindergarten structure
  */
-
 async function loadKStandards(): Promise<
   { code: string; description: string }[]
 > {
@@ -156,113 +145,6 @@ async function loadKStandards(): Promise<
   }
   return flat;
 }
-
-/**
- * Module: Prompt builder — system plus user prompt
- */
-
-/* moved to lib/prompts */
-/* function computeSystemPrompt(
-  p: Page,
-  standardsCatalog: { code: string; description: string }[],
-): string {
-  const isWorksheet = (p.pageType || "coloring") === "worksheet";
-  const { w, h } = letterSize(p.orientation);
-  const letter = `${w}×${h} ${p.orientation}`;
-  const printRules = [
-    `Print target: US Letter ${letter}.`,
-    "Output: one black and white line art image for print.",
-    "Style: thick uniform outlines, high contrast, large closed shapes. No gray tones. No shading. No halftones. No photo textures.",
-    "Background: white only.",
-    "Exclusions: no frames, borders, watermarks, signatures, logos, or captions.",
-    "Aspect: do not change the provided orientation.",
-    "If a mask is provided, change only masked regions and keep all unmasked regions identical.",
-  ].join(" ");
-  if (isWorksheet) {
-    const selected = p.standards || [];
-    const codes = selected.join(", ");
-    const lookup = new Map(
-      standardsCatalog.map((s) => [s.code, s.description] as const),
-    );
-    const descs = selected
-      .map((code) => {
-        const d = lookup.get(code) || "";
-        return d ? `${code}: ${d}` : "";
-      })
-      .filter(Boolean);
-    const ccSummary = codes
-      ? `Common Core Kindergarten focus: ${codes}. `
-      : "Common Core Kindergarten math practices. ";
-    const ccDetail = descs.length
-      ? `Target standards: ${descs.join("; ")}. `
-      : "";
-    const wk = [
-      "Purpose: a solvable worksheet that a kindergarten student can complete independently.",
-      "1) Provide exactly one short instruction line at the top in simple English.",
-      "2) Use concrete visual math tools such as ten frames, number lines, dot cards, or simple manipulatives.",
-      "3) Quantities never exceed 10. Prefer numerals for labels and examples.",
-      "4) Use three to six tasks or one main task with three to six parts.",
-      "5) Provide large answer areas about 1.25 inch squares or lines with generous white space.",
-      "6) Layout flows left to right then top to bottom. Keep balance and clarity.",
-      "7) High contrast line art suitable for printing.",
-    ].join(" ");
-    const wkNegatives = [
-      "Do not add titles or headers.",
-      "Do not add decorative frames.",
-      "",
-      "Do not include stickers, emojis, photographs, or gray fills.",
-    ].join(" ");
-    return `${ccSummary}${ccDetail}${wk} ${printRules} ${wkNegatives}`.trim();
-  }
-  const styleName = p.coloringStyle || "classic";
-  const styleText =
-    styleName === "anime"
-      ? "Style: anime for children. Clean inked outlines, friendly faces, very large fill areas. No screen tones."
-      : styleName === "retro"
-        ? "Style: retro nineteen sixty cartoon look. Bold contour lines, simple geometry, playful characters."
-        : "Style: classic coloring book. Bold outlines and large closed regions that are easy to color.";
-  const col = [
-    "Purpose: a kid friendly coloring page with one clear subject and readable shapes.",
-    "1) Composition fills the printable area while preserving balanced white space.",
-    "2) Use thick outlines and closed shapes to avoid tiny slivers.",
-    "3) No text at all.",
-    "4) High contrast line art that prints cleanly.",
-  ].join(" ");
-  const colNegatives = [
-    "Do not use gray tones or shading.",
-    "Do not use fine hatching or dense patterns.",
-    "Do not add borders, titles, captions, watermarks, or logos.",
-    "Do not place elements on or past the margins.",
-  ].join(" ");
-  return `${styleText} ${col} ${printRules} ${colNegatives}`.trim();
-} */
-
-// Derived System Prompt: compute unless user has edited
-/* function getEffectiveSystemPrompt(
-  page: Page,
-  catalog: { code: string; description: string }[],
-): string {
-  return page.systemPromptEdited
-    ? (page.systemPrompt ?? "")
-    : computeSystemPrompt(page, catalog);
-} */
-
-// Summarize page children for prompts and generation context
-/* function summarizePageForPrompt(page: Page): string {
-  const items = (page.children || []).map((c) => {
-    const size = `${Math.round(c.width)}x${Math.round(c.height)}`;
-    const pos = `(${Math.round(c.x)}, ${Math.round(c.y)})`;
-    if (c.type === "text") {
-      const tc = c as TextChild;
-      const text = (tc.text || "").slice(0, 80);
-      return `Text "${text}" at ${pos} size ${size}${tc.align ? ` align ${tc.align}` : ""}`;
-    } else {
-      const ic = c as ImageChild;
-      return `${ic.src ? "Image" : "Image placeholder"} at ${pos} size ${size}`;
-    }
-  });
-  return items.join("\n");
-} */
 
 function useAutoScrollIntoView(id: string | null) {
   useEffect(() => {
@@ -295,85 +177,6 @@ function useGeminiApiKeyNeeded() {
   }, []);
   return needsApiKey;
 }
-
-/**
- * Module: PDF helpers
- */
-
-/* moved to lib/pdf
-async function flattenPageToPng(page: Page): Promise<string | null> {
-  if (page.children && page.children.length) {
-    const { StaticCanvas, IText, Image } = await import("fabric");
-    const { pxW, pxH } = pagePx(page.orientation);
-    const canvas = new StaticCanvas(undefined, {
-      width: pxW,
-      height: pxH,
-      backgroundColor: "#fff",
-    });
-    for (const c of page.children) {
-      if (c.visible === false) continue;
-      if (c.type === "text") {
-        const tc = c as TextChild;
-        const t = new IText(tc.text || "", {
-          left: tc.x,
-          top: tc.y,
-          fontFamily: tc.fontFamily || "Inter",
-          fontSize: tc.fontSize || 24,
-          fontWeight: tc.fontWeight || "normal",
-          fontStyle: tc.italic ? "italic" : "",
-          textAlign: tc.align || "left",
-          fill: "#000",
-        });
-        t.set({ angle: c.angle || 0 });
-        if (t.width && t.height) {
-          t.set({
-            scaleX: c.width / t.width,
-            scaleY: c.height / t.height,
-          });
-        }
-        canvas.add(t);
-      } else {
-        const ic = c as ImageChild;
-        if (!ic.src) {
-          // skip placeholders in flatten
-          continue;
-        }
-        const img = await Image.fromURL(ic.src, { crossOrigin: "anonymous" });
-        img.set({ left: ic.x, top: ic.y, angle: ic.angle || 0 });
-        if (img.width && img.height) {
-          img.set({
-            scaleX: ic.width / img.width,
-            scaleY: ic.height / img.height,
-          });
-        }
-        canvas.add(img);
-      }
-    }
-    canvas.renderAll();
-    return canvas.toDataURL({ format: "png", multiplier: 2 });
-  }
-  if (page.imageUrl) return page.imageUrl;
-  return null;
-} */
-
-/* async function addPageToJsPdf(pdf: jsPDF, page: Page) {
-  const { w: pageW, h: pageH } = letterSize(page.orientation);
-  const m = 0;
-  const imgW = pageW;
-  const imgH = pageH;
-  const png = await flattenPageToPng(page);
-  if (!png) return;
-  pdf.addImage(png, "PNG", m, m, imgW, imgH, undefined, "FAST");
-  const codes = (page.standards || []).join(", ");
-  if (codes) {
-    pdf.setFontSize(8);
-    pdf.text(`Standards: ${codes}`, m, pageH - 0.3);
-  }
-} */
-
-/**
- * Module: Editor component
- */
 
 export default function Editor() {
   const pages = usePages();
