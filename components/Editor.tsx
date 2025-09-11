@@ -62,16 +62,13 @@ import type {
   ImageChild,
   Orientation,
 } from "@/store/useEditorStore";
+import { letterSize, pagePx } from "@/lib/image/pageMetrics";
 
 /**
  * Module: Constants and narrow utilities
  */
 
-const DPI = 96;
 const DEFAULT_THRESHOLD = 200;
-
-const getLetterSizeIn = (o: Orientation) =>
-  o === "portrait" ? { w: 8.5, h: 11 } : { w: 11, h: 8.5 };
 
 export const nodeTypes: NodeTypes = { page: PageNode };
 
@@ -106,14 +103,6 @@ async function createImage(src: string) {
  * Module: Image utilities — fit, trim, threshold, base64
  */
 
-function computePagePx(p: Page): { pxW: number; pxH: number } {
-  const { w, h } = getLetterSizeIn(p.orientation);
-  return {
-    pxW: Math.max(1, Math.round(w * DPI)),
-    pxH: Math.max(1, Math.round(h * DPI)),
-  };
-}
-
 async function blobUrlToPngBase64(url: string): Promise<string> {
   const img = await createImage(url);
   const max = 1650; // ~150dpi letter bound
@@ -131,7 +120,7 @@ async function blobUrlToPngBase64(url: string): Promise<string> {
 }
 
 async function fitImageToPrintableArea(url: string, p: Page): Promise<string> {
-  const { pxW, pxH } = computePagePx(p);
+  const { pxW, pxH } = pagePx(p.orientation);
   const img = await createImage(url);
 
   const srcCanvas = document.createElement("canvas");
@@ -410,7 +399,7 @@ function computeSystemPrompt(
   standardsCatalog: { code: string; description: string }[],
 ): string {
   const isWorksheet = (p.pageType || "coloring") === "worksheet";
-  const { w, h } = getLetterSizeIn(p.orientation);
+  const { w, h } = letterSize(p.orientation);
   const letter = `${w}×${h} ${p.orientation}`;
   const printRules = [
     `Print target: US Letter ${letter}.`,
@@ -686,7 +675,7 @@ function useKeyboardShortcuts(opts: {
 async function flattenPageToPng(page: Page): Promise<string | null> {
   if (page.children && page.children.length) {
     const { StaticCanvas, IText, Image } = await import("fabric");
-    const { pxW, pxH } = computePagePx(page);
+    const { pxW, pxH } = pagePx(page.orientation);
     const canvas = new StaticCanvas(undefined, {
       width: pxW,
       height: pxH,
@@ -739,7 +728,7 @@ async function flattenPageToPng(page: Page): Promise<string | null> {
 }
 
 async function addPageToJsPdf(pdf: jsPDF, page: Page) {
-  const { w: pageW, h: pageH } = getLetterSizeIn(page.orientation);
+  const { w: pageW, h: pageH } = letterSize(page.orientation);
   const m = 0;
   const imgW = pageW;
   const imgH = pageH;

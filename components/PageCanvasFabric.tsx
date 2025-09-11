@@ -3,6 +3,7 @@
 
 import { useEffect, useMemo, useRef } from "react";
 import type { TextChild, ImageChild } from "@/store/useEditorStore";
+import { pagePx } from "@/lib/image/pageMetrics";
 
 type Props = {
   pageId: string;
@@ -12,8 +13,6 @@ type Props = {
   onChildrenChange: (pageId: string, next: (TextChild | ImageChild)[]) => void;
   onSelectChild: (pageId: string, childId: string | null) => void;
 };
-
-const DPI = 96;
 
 export default function PageCanvasFabric(props: Props) {
   const {
@@ -43,9 +42,8 @@ export default function PageCanvasFabric(props: Props) {
   itemsLatestRef.current = items;
 
   const dims = useMemo(() => {
-    const wIn = orientation === "portrait" ? 8.5 : 11;
-    const hIn = orientation === "portrait" ? 11 : 8.5;
-    return { w: Math.round(wIn * DPI), h: Math.round(hIn * DPI) };
+    const { pxW, pxH } = pagePx(orientation);
+    return { w: pxW, h: pxH };
   }, [orientation]);
 
   // initialize Fabric (guarded for Strict Mode double-invoke)

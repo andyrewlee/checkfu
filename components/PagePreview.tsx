@@ -6,6 +6,7 @@
  */
 
 import { useMemo } from "react";
+import { pagePx } from "@/lib/image/pageMetrics";
 import Image from "next/image";
 
 type Orientation = "portrait" | "landscape";
@@ -19,11 +20,9 @@ export default function PagePreview({
   imageUrl?: string;
   ariaLabel?: string;
 }) {
-  const DPI = 96;
   const dims = useMemo(() => {
-    const wIn = orientation === "portrait" ? 8.5 : 11;
-    const hIn = orientation === "portrait" ? 11 : 8.5;
-    return { w: Math.round(wIn * DPI), h: Math.round(hIn * DPI) };
+    const { pxW, pxH } = pagePx(orientation);
+    return { w: pxW, h: pxH };
   }, [orientation]);
 
   return (

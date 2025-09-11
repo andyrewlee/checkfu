@@ -14,8 +14,7 @@ import type { Node as RFNode, NodeProps } from "@xyflow/react";
 import { Handle, Position, NodeToolbar } from "@xyflow/react";
 import PageCanvasFabric from "@/components/PageCanvasFabric";
 import { usePageById, useActions } from "@/store/useEditorStore";
-
-const DPI = 96;
+import { pagePx } from "@/lib/image/pageMetrics";
 
 export type PageNodeData =
   | { pageId: string } // store-driven mode
@@ -48,9 +47,8 @@ function PageNode({ data, selected }: NodeProps<PageRFNode>) {
     ? (page?.orientation ?? "portrait")
     : (data as any).orientation;
   const dims = useMemo(() => {
-    const wIn = orientation === "portrait" ? 8.5 : 11;
-    const hIn = orientation === "portrait" ? 11 : 8.5;
-    return { w: Math.round(wIn * DPI), h: Math.round(hIn * DPI) };
+    const { pxW, pxH } = pagePx(orientation);
+    return { w: pxW, h: pxH };
   }, [orientation]);
 
   return (
