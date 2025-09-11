@@ -41,6 +41,7 @@ import type {
 } from "@xyflow/react";
 import { jsPDF } from "jspdf";
 import PageNode, { type PageNodeData } from "@/components/nodes/PageNode";
+import { newId } from "@/lib/ids";
 // Layers panel removed from Inspector to focus on a single selection
 import {
   useActions,
@@ -827,7 +828,7 @@ export default function Editor() {
     text: string,
     kind: "error" | "info" | "success" = "info",
   ) {
-    const id = crypto.randomUUID();
+    const id = newId("img");
     setToasts((ts) => ts.concat({ id, kind, text }));
     setTimeout(() => setToasts((ts) => ts.filter((t) => t.id !== id)), 4000);
   }
@@ -917,7 +918,7 @@ export default function Editor() {
     (url: string, title = "Image", overrides?: Partial<Page>) => {
       const id =
         (actions as any).addPageFromImage?.(url, title, overrides) ??
-        crypto.randomUUID();
+        newId("tmp");
       // optionally apply threshold here if needed
       return id as string;
     },
@@ -1573,7 +1574,7 @@ export default function Editor() {
               className="px-2 py-1 text-sm border rounded inline-flex items-center gap-1"
               title="Create a new page"
               onClick={() => {
-                const id = crypto.randomUUID();
+                const id = newId("p");
                 const p: Page = {
                   id,
                   title: "New Page",

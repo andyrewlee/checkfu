@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { temporal } from "zundo";
+import { newId } from "@/lib/ids";
 
 /**
  * Checkfu — Domain Store (Undo/Redo via zundo)
@@ -164,10 +165,7 @@ export const useEditorStore = create<Store>()(
         },
         addEmptyPage: (overrides) => {
           const overrideId = overrides?.id as string | undefined;
-          const id =
-            overrideId ||
-            globalThis.crypto?.randomUUID?.() ||
-            `p_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+          const id = overrideId || newId("p");
           const defaults: Page = {
             id,
             title: "New Page",
@@ -259,9 +257,7 @@ export const useEditorStore = create<Store>()(
 
         // Graph helpers
         addEdge: (source, target) => {
-          const id =
-            globalThis.crypto?.randomUUID?.() ||
-            `e_${source}_${target}_${Date.now()}`;
+          const id = newId("e");
           set((s) => ({ edges: s.edges.concat({ id, source, target }) }));
           return id;
         },
@@ -271,9 +267,7 @@ export const useEditorStore = create<Store>()(
         branch: (parentId, prompt) => {
           const parent = get().pages[parentId];
           if (!parent) return "";
-          const id =
-            globalThis.crypto?.randomUUID?.() ||
-            `p_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+          const id = newId("p");
           const child: Page = {
             ...parent,
             id,
@@ -284,9 +278,7 @@ export const useEditorStore = create<Store>()(
             children: [...(parent.children || [])],
             selectedChildId: null,
           };
-          const edgeId =
-            globalThis.crypto?.randomUUID?.() ||
-            `e_${parentId}_${id}_${Date.now()}`;
+          const edgeId = newId("e");
           set((s) => ({
             pages: { ...s.pages, [id]: child },
             order: s.order.concat(id),
@@ -315,9 +307,7 @@ export const useEditorStore = create<Store>()(
             // reattach children to chosen parent
             if (parentId) {
               const newEdges = outgoing.map((e) => ({
-                id:
-                  globalThis.crypto?.randomUUID?.() ||
-                  `e_${parentId}_${e.target}_${Date.now()}`,
+                id: newId("e"),
                 source: parentId!,
                 target: e.target,
               }));
