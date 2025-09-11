@@ -5,6 +5,16 @@ import { useEffect, useMemo, useRef } from "react";
 import type { TextChild, ImageChild } from "@/store/useEditorStore";
 import { pagePx } from "@/lib/image/pageMetrics";
 import { useHydrationFence } from "@/hooks/useHydrationFence";
+import {
+  normalizeTextScaling,
+  fabricToChild,
+  childrenEqual,
+} from "@/lib/fabric/translators";
+import {
+  createImageFromURL,
+  createImagePlaceholder,
+  createTextObject,
+} from "@/lib/fabric/constructors";
 
 type Props = {
   pageId: string;
@@ -47,9 +57,7 @@ export default function PageCanvasFabric(props: Props) {
   useEffect(() => {
     if (fabricRef.current) return;
     (async () => {
-      const { Canvas, IText, Image, Rect, Line, Group } = await import(
-        "fabric"
-      );
+      const { Canvas } = await import("fabric");
       if (!canvasElRef.current) return;
       const el = canvasElRef.current as HTMLCanvasElement;
       // Defensive: if element was previously initialized, clear fabric markers
@@ -90,93 +98,7 @@ export default function PageCanvasFabric(props: Props) {
         }
       });
 
-      // commit edits back to state
-      const normalizeTextScaling = (obj: any) => {
-        if (obj?.checkfuType !== "text") return;
-        const sx = obj.scaleX || 1;
-        const sy = obj.scaleY || 1;
-        if (sx !== 1 || sy !== 1) {
-          const base = obj.fontSize || 24;
-          const nextFont = Math.max(6, Math.round(base * Math.max(sx, sy)));
-          obj.set({ fontSize: nextFont, scaleX: 1, scaleY: 1 });
-          if (typeof obj.initDimensions === "function") obj.initDimensions();
-        }
-      };
-
-      // Robust equality:
-      // - id-based and order-insensitive
-      // - tolerant to tiny float jitter
-      // - ignores derived text width/height (Fabric measures text)
-      const within = (a = 0, b = 0, eps = 0.5) => Math.abs(a - b) <= eps;
-      const same = (
-        a: (TextChild | ImageChild)[],
-        b: (TextChild | ImageChild)[],
-      ) => {
-        if (a.length !== b.length) return false;
-        const map = new Map<string, any>(b.map((c: any) => [c.id, c]));
-        for (const x of a as any[]) {
-          const y = map.get(x.id);
-          if (!y || x.type !== y.type) return false;
-          if (!within(x.x, y.x) || !within(x.y, y.y)) return false;
-          if (!within(x.angle || 0, y.angle || 0)) return false;
-          if (!!x.visible !== !!y.visible) return false;
-          if (!!x.locked !== !!y.locked) return false;
-          if (x.type === "text") {
-            if (
-              x.text !== y.text ||
-              x.fontFamily !== y.fontFamily ||
-              x.fontSize !== y.fontSize ||
-              x.fontWeight !== y.fontWeight ||
-              !!x.italic !== !!y.italic ||
-              (x.align || "left") !== (y.align || "left")
-            )
-              return false;
-            // Ignore width/height for text nodes
-          } else {
-            if (x.src !== y.src) return false;
-            if (!within(x.width, y.width, 1) || !within(x.height, y.height, 1))
-              return false;
-          }
-        }
-        return true;
-      };
-
-      // helper: build a store child from a Fabric object
-      const buildChildFromObj = (obj: any): TextChild | ImageChild => {
-        const round = (n: number | undefined) =>
-          Math.max(0, Math.round(n ?? 0));
-        const base = {
-          id: obj.checkfuId as string,
-          type: obj.checkfuType as "text" | "image",
-          x: round(obj.left),
-          y: round(obj.top),
-          width: round((obj.width || 1) * (obj.scaleX || 1)),
-          height: round((obj.height || 1) * (obj.scaleY || 1)),
-          angle: round(obj.angle || 0),
-          visible: !!obj.visible,
-          locked: !obj.selectable,
-          z: 0,
-        };
-
-        if (obj.checkfuType === "text") {
-          return {
-            ...base,
-            text: obj.text || "",
-            fontFamily: obj.fontFamily || "Inter",
-            fontSize: obj.fontSize || 24,
-            fontWeight: obj.fontWeight || "normal",
-            italic: obj.fontStyle === "italic",
-            align: obj.textAlign || "left",
-          } as TextChild;
-        } else {
-          return {
-            ...base,
-            src: (obj.checkfuSrc as string) ?? undefined,
-            placeholder: !!obj.checkfuPlaceholder,
-            crop: null,
-          } as ImageChild;
-        }
-      };
+      // commit edits back to state (helpers imported from translators)
 
       const commit = () => {
         if (isHydrating()) return;
@@ -184,7 +106,7 @@ export default function PageCanvasFabric(props: Props) {
         canvas.getObjects().forEach(normalizeTextScaling);
 
         // 1) Read the authoritative state from Fabric
-        const draft = canvas.getObjects().map(buildChildFromObj);
+        const draft = canvas.getObjects().map(fabricToChild);
 
         // 2) Preserve previous ordering where possible (more stable diffs)
         const prevOrder = new Map<string, number>(
@@ -204,7 +126,7 @@ export default function PageCanvasFabric(props: Props) {
         });
 
         // 3) Avoid no-op writes
-        if (!same(draft, itemsLatestRef.current)) {
+        if (!childrenEqual(draft, itemsLatestRef.current)) {
           requestAnimationFrame(() => onChildrenChange(pageId, draft));
         }
         canvas.requestRenderAll();
@@ -258,14 +180,13 @@ export default function PageCanvasFabric(props: Props) {
             const data = JSON.parse(payload);
             if (data.kind === "text") {
               const id = crypto.randomUUID();
-              const t = new IText("New text", {
+              const t: any = await createTextObject({
                 left: pointer.x,
                 top: pointer.y,
                 fontFamily: "Inter",
                 fontSize: 24,
                 fill: "#000",
               });
-              t.set({ scaleX: 1, scaleY: 1 });
               (t as any).checkfuId = id;
               (t as any).checkfuType = "text";
               canvas.add(t);
@@ -276,23 +197,7 @@ export default function PageCanvasFabric(props: Props) {
             } else if (data.kind === "image") {
               // Create placeholder rectangle with an X
               const id = crypto.randomUUID();
-              const w = 200,
-                h = 150;
-              const rect = new Rect({
-                left: 0,
-                top: 0,
-                width: w,
-                height: h,
-                fill: "",
-                stroke: "#94a3b8",
-                strokeDashArray: [4, 3],
-              });
-              const l1 = new Line([0, 0, w, h], { stroke: "#cbd5e1" });
-              const l2 = new Line([0, h, w, 0], { stroke: "#cbd5e1" });
-              const g: any = new Group([rect, l1, l2], {
-                left: pointer.x,
-                top: pointer.y,
-              });
+              const g: any = await createImagePlaceholder(pointer.x, pointer.y);
               g.checkfuId = id;
               g.checkfuType = "image";
               g.checkfuSrc = undefined;
@@ -310,9 +215,7 @@ export default function PageCanvasFabric(props: Props) {
         );
         if (file) {
           const url = URL.createObjectURL(file);
-          const img: any = await Image.fromURL(url, {
-            crossOrigin: "anonymous",
-          });
+          const img: any = await createImageFromURL(url);
           const id = crypto.randomUUID();
           img.set({
             left: pointer.x,
@@ -405,7 +308,7 @@ export default function PageCanvasFabric(props: Props) {
 }
 
 async function hydrate(canvas: any, items: (TextChild | ImageChild)[]) {
-  const { IText, Image, Rect, Line, Group } = await import("fabric");
+  // Fabric classes are loaded on demand by constructors where needed.
   const current = new Map<string, any>();
   canvas.getObjects().forEach((o: any) => current.set(o.checkfuId, o));
   // Track active selection to preserve across replacements
@@ -430,38 +333,27 @@ async function hydrate(canvas: any, items: (TextChild | ImageChild)[]) {
     let obj = current.get(c.id);
     if (!obj) {
       if (c.type === "text") {
-        obj = new IText((c as any).text || "", {
-          left: c.x,
-          top: c.y,
-          fontFamily: (c as any).fontFamily || "Inter",
-          fontSize: (c as any).fontSize || 24,
-          fontWeight: (c as any).fontWeight || "normal",
-          fontStyle: (c as any).italic ? "italic" : "",
-          textAlign: (c as any).align || "left",
+        const tc = c as TextChild;
+        obj = await createTextObject({
+          left: tc.x,
+          top: tc.y,
+          fontFamily: tc.fontFamily || "Inter",
+          fontSize: tc.fontSize || 24,
+          text: tc.text || "",
           fill: "#000",
         });
-        obj.set({ scaleX: 1, scaleY: 1 });
+        (obj as any).set({
+          fontWeight: tc.fontWeight || "normal",
+          fontStyle: tc.italic ? "italic" : "",
+          textAlign: tc.align || "left",
+        });
       } else {
         const ic = c as ImageChild;
         if (ic.src) {
-          obj = await Image.fromURL(ic.src, { crossOrigin: "anonymous" });
-          obj.checkfuSrc = ic.src;
+          obj = await createImageFromURL(ic.src);
+          (obj as any).checkfuSrc = ic.src;
         } else {
-          // placeholder X
-          const baseW = 200,
-            baseH = 150;
-          const rect = new Rect({
-            left: 0,
-            top: 0,
-            width: baseW,
-            height: baseH,
-            fill: "",
-            stroke: "#94a3b8",
-            strokeDashArray: [4, 3],
-          });
-          const l1 = new Line([0, 0, baseW, baseH], { stroke: "#cbd5e1" });
-          const l2 = new Line([0, baseH, baseW, 0], { stroke: "#cbd5e1" });
-          obj = new Group([rect, l1, l2], { left: c.x, top: c.y });
+          obj = await createImagePlaceholder(c.x, c.y);
           (obj as any).checkfuPlaceholder = true;
         }
       }
@@ -502,9 +394,7 @@ async function hydrate(canvas: any, items: (TextChild | ImageChild)[]) {
           // replace placeholder or refresh image with new src
           const objsAll = canvas.getObjects();
           const idx = objsAll.indexOf(obj);
-          const newImg = await Image.fromURL(ic.src as string, {
-            crossOrigin: "anonymous",
-          });
+          const newImg = await createImageFromURL(ic.src as string);
           (newImg as any).checkfuId = c.id;
           (newImg as any).checkfuType = "image";
           (newImg as any).checkfuSrc = ic.src;
@@ -527,24 +417,8 @@ async function hydrate(canvas: any, items: (TextChild | ImageChild)[]) {
           if (activeId && c.id === activeId) reselection = obj;
         } else if (!ic.src && !isPlaceholder) {
           // State cleared src → ensure placeholder is shown
-          const baseW = 200,
-            baseH = 150;
-          const rect = new Rect({
-            left: 0,
-            top: 0,
-            width: baseW,
-            height: baseH,
-            fill: "",
-            stroke: "#94a3b8",
-            strokeDashArray: [4, 3],
-          });
-          const l1 = new Line([0, 0, baseW, baseH], { stroke: "#cbd5e1" });
-          const l2 = new Line([0, baseH, baseW, 0], { stroke: "#cbd5e1" });
           const idx = canvas.getObjects().indexOf(obj);
-          const placeholder: any = new Group([rect, l1, l2], {
-            left: c.x,
-            top: c.y,
-          });
+          const placeholder: any = await createImagePlaceholder(c.x, c.y);
           placeholder.checkfuId = c.id;
           placeholder.checkfuType = "image";
           placeholder.checkfuSrc = undefined;
