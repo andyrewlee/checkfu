@@ -65,6 +65,8 @@ import type {
   Orientation,
 } from "@/store/useEditorStore";
 import { letterSize, pagePx } from "@/lib/image/pageMetrics";
+import { useDropAndPasteImport } from "@/hooks/useDropAndPasteImport";
+import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 
 /**
  * Module: Constants and narrow utilities
@@ -490,19 +492,6 @@ function summarizePageForPrompt(page: Page): string {
   return items.join("\n");
 }
 
-/**
- * Hooks — event-safe callbacks and DOM listeners
- */
-function useEvent<TArgs extends unknown[], TReturn>(
-  fn: (...args: TArgs) => TReturn,
-): (...args: TArgs) => TReturn {
-  const ref = useRef(fn);
-  useEffect(() => {
-    ref.current = fn;
-  }, [fn]);
-  return useCallback((...args: TArgs) => ref.current(...args), []);
-}
-
 function useAutoScrollIntoView(id: string | null) {
   useEffect(() => {
     if (!id) return;
@@ -533,133 +522,6 @@ function useGeminiApiKeyNeeded() {
     return () => window.removeEventListener("storage", onStorage);
   }, []);
   return needsApiKey;
-}
-
-function useDropAndPasteImport<T extends HTMLElement>(
-  targetRef: React.RefObject<T | null>,
-  onImportImage: (url: string, title?: string) => void,
-  onError?: (msg: string) => void,
-) {
-  const importLatest = useEvent(onImportImage);
-  const errorLatest = useEvent(
-    onError ?? ((() => {}) as (msg: string) => void),
-  );
-
-  useEffect(() => {
-    const el = targetRef.current;
-    if (!el) return;
-
-    const onDragOver = (e: DragEvent) => {
-      e.preventDefault();
-      if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
-    };
-    const onDrop = async (e: DragEvent) => {
-      e.preventDefault();
-      if (!e.dataTransfer) return;
-      const files = Array.from(e.dataTransfer.files || []);
-      for (const file of files) {
-        if (file.type.startsWith("image/")) {
-          importLatest(URL.createObjectURL(file), file.name);
-        }
-      }
-      if (files.length) return;
-      const urlText =
-        e.dataTransfer.getData("text/uri-list") ||
-        e.dataTransfer.getData("text/plain");
-      if (urlText && /^https?:\/\//i.test(urlText)) {
-        try {
-          const resp = await fetch(urlText);
-          const blob = await resp.blob();
-          if (blob.type.startsWith("image/")) {
-            importLatest(URL.createObjectURL(blob), "Dropped URL image");
-          }
-        } catch {
-          errorLatest("Failed to fetch dropped URL");
-        }
-      }
-    };
-
-    const onPaste = async (e: ClipboardEvent) => {
-      if (!e.clipboardData) return;
-      const items = Array.from(e.clipboardData.items || []);
-      const imgItem = items.find((it) => it.type.startsWith("image/"));
-      if (imgItem) {
-        const file = imgItem.getAsFile();
-        if (!file) return;
-        importLatest(URL.createObjectURL(file), "Pasted image");
-        return;
-      }
-      const text = e.clipboardData.getData("text/plain");
-      if (text && /^https?:\/\//i.test(text)) {
-        try {
-          const resp = await fetch(text);
-          const blob = await resp.blob();
-          if (blob.type.startsWith("image/")) {
-            importLatest(URL.createObjectURL(blob), "Pasted URL image");
-          }
-        } catch {
-          errorLatest("Failed to fetch pasted URL");
-        }
-      }
-    };
-
-    el.addEventListener("dragover", onDragOver);
-    el.addEventListener("drop", onDrop);
-    window.addEventListener("paste", onPaste);
-    return () => {
-      el.removeEventListener("dragover", onDragOver);
-      el.removeEventListener("drop", onDrop);
-      window.removeEventListener("paste", onPaste);
-    };
-  }, [targetRef, importLatest, errorLatest]);
-}
-
-function useKeyboardShortcuts(opts: {
-  onQuickGenerate: () => void;
-  onDeleteSelected: () => void;
-  onUndo: () => void;
-  onRedo: () => void;
-}) {
-  const onQuick = useEvent(opts.onQuickGenerate);
-  const onDelete = useEvent(opts.onDeleteSelected);
-  const onUndo = useEvent(opts.onUndo);
-  const onRedo = useEvent(opts.onRedo);
-
-  useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
-      const active = document.activeElement as HTMLElement | null;
-      const editing = !!(
-        active &&
-        (active.tagName === "INPUT" ||
-          active.tagName === "TEXTAREA" ||
-          active.isContentEditable)
-      );
-      if (!editing && (e.ctrlKey || e.metaKey) && e.key === "Enter") {
-        e.preventDefault();
-        onQuick();
-      } else if (!editing && (e.key === "Delete" || e.key === "Backspace")) {
-        e.preventDefault();
-        onDelete();
-      } else if (
-        !editing &&
-        (e.ctrlKey || e.metaKey) &&
-        e.key.toLowerCase() === "z"
-      ) {
-        e.preventDefault();
-        if (e.shiftKey) onRedo();
-        else onUndo();
-      } else if (
-        !editing &&
-        (e.ctrlKey || e.metaKey) &&
-        e.key.toLowerCase() === "y"
-      ) {
-        e.preventDefault();
-        onRedo();
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onQuick, onDelete, onUndo, onRedo]);
 }
 
 /**
