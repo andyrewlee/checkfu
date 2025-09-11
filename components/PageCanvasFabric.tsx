@@ -11,6 +11,7 @@ import {
   childrenEqual,
 } from "@/lib/fabric/translators";
 import { wireSelectionHandlers } from "@/lib/fabric/events";
+import { newId } from "@/lib/ids";
 import {
   createImageFromURL,
   createImagePlaceholder,
@@ -164,7 +165,7 @@ export default function PageCanvasFabric(props: Props) {
           try {
             const data = JSON.parse(payload);
             if (data.kind === "text") {
-              const id = crypto.randomUUID();
+              const id = newId("t");
               const t: any = await createTextObject({
                 left: pointer.x,
                 top: pointer.y,
@@ -181,7 +182,7 @@ export default function PageCanvasFabric(props: Props) {
               return;
             } else if (data.kind === "image") {
               // Create placeholder rectangle with an X
-              const id = crypto.randomUUID();
+              const id = newId("imgph");
               const g: any = await createImagePlaceholder(pointer.x, pointer.y);
               g.checkfuId = id;
               g.checkfuType = "image";
@@ -201,7 +202,7 @@ export default function PageCanvasFabric(props: Props) {
         if (file) {
           const url = URL.createObjectURL(file);
           const img: any = await createImageFromURL(url);
-          const id = crypto.randomUUID();
+          const id = newId("img");
           img.set({
             left: pointer.x,
             top: pointer.y,
