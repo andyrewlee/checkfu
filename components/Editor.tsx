@@ -42,6 +42,7 @@ import type {
 import { jsPDF } from "jspdf";
 import PageNode, { type PageNodeData } from "@/components/nodes/PageNode";
 import { newId } from "@/lib/ids";
+import { revokeIfBlob } from "@/lib/url";
 // Layers panel removed from Inspector to focus on a single selection
 import {
   useActions,
@@ -80,14 +81,6 @@ const RF_TRANSLATE_EXTENT: [[number, number], [number, number]] = [
   [-100000, -100000],
   [100000, 100000],
 ];
-
-function revokeIfBlob(url?: string) {
-  try {
-    if (url && url.startsWith("blob:")) URL.revokeObjectURL(url);
-  } catch {
-    /* ignore */
-  }
-}
 
 async function createImage(src: string) {
   const img = new Image();
@@ -2206,11 +2199,7 @@ export default function Editor() {
                                     );
                                     // revoke old blob if present
                                     const old = (child as ImageChild).src;
-                                    if (old && old.startsWith("blob:")) {
-                                      try {
-                                        URL.revokeObjectURL(old);
-                                      } catch {}
-                                    }
+                                    revokeIfBlob(old);
                                     setPagePatch(currentPageId!, {
                                       children: next,
                                     });
