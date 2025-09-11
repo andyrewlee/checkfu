@@ -10,6 +10,7 @@ import {
   fabricToChild,
   childrenEqual,
 } from "@/lib/fabric/translators";
+import { wireSelectionHandlers } from "@/lib/fabric/events";
 import {
   createImageFromURL,
   createImagePlaceholder,
@@ -56,6 +57,7 @@ export default function PageCanvasFabric(props: Props) {
   //   mirrors the authoritative state. Equality checks avoid redundant writes.
   useEffect(() => {
     if (fabricRef.current) return;
+    let detachSelection: (() => void) | null = null;
     (async () => {
       const { Canvas } = await import("fabric");
       if (!canvasElRef.current) return;
@@ -76,26 +78,9 @@ export default function PageCanvasFabric(props: Props) {
       });
       fabricRef.current = canvas;
 
-      // selection events (deduped) and force redraw to keep handles visible
-      const lastSelRef = { current: null as string | null };
-      const setFromSelection = (e: any) => {
-        if (isHydrating()) return;
-        const obj = e?.selected?.[0];
-        const id: string | null = obj?.checkfuId || null;
-        if (id !== lastSelRef.current) {
-          onSelectChild(pageId, id);
-          lastSelRef.current = id;
-          canvas.requestRenderAll();
-        }
-      };
-      canvas.on("selection:created", setFromSelection);
-      canvas.on("selection:updated", setFromSelection);
-      canvas.on("selection:cleared", () => {
-        if (isHydrating()) return;
-        if (lastSelRef.current !== null) {
-          lastSelRef.current = null;
-          onSelectChild(pageId, null);
-        }
+      detachSelection = wireSelectionHandlers(canvas, isHydrating, (id) => {
+        onSelectChild(pageId, id);
+        canvas.requestRenderAll();
       });
 
       // commit edits back to state (helpers imported from translators)
@@ -252,6 +237,7 @@ export default function PageCanvasFabric(props: Props) {
         fabricRef.current?.dispose();
       } catch {}
       fabricRef.current = null;
+      detachSelection?.();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
