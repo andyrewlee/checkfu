@@ -328,6 +328,9 @@ export default function Editor() {
   const deletePageMutation = useMutation(
     apiAny.pages?.deletePageDeep ?? apiAny.explore?.deletePageDeep,
   );
+  const deleteChildNodeMutation = useMutation(
+    apiAny.nodes?.deleteNode ?? apiAny.explore?.deleteNode,
+  );
 
   const [projectId, setProjectId] = useState<string | null>(null);
   // Fetch full project once we have an id
@@ -1979,7 +1982,8 @@ export default function Editor() {
                                     ).filter((c) => c.id !== cid),
                                     selectedChildId: null,
                                   });
-                                  // Persisting child deletes to server is disabled in this simplified flow
+                                  // Persist to Convex
+                                  void deleteChildNodeMutation({ nodeId: cid });
                                 }}
                               >
                                 Delete Text
@@ -2123,7 +2127,8 @@ export default function Editor() {
                                     ).filter((c) => c.id !== cid),
                                     selectedChildId: null,
                                   });
-                                  // Persisting child deletes to server is disabled in this simplified flow
+                                  // Persist to Convex
+                                  void deleteChildNodeMutation({ nodeId: cid });
                                 }}
                               >
                                 Delete Image
