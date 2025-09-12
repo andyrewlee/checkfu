@@ -1,41 +1,34 @@
 "use client";
 
-import { useEffect } from "react";
-import { useClerk } from "@clerk/nextjs";
+import { useLayoutEffect, useState } from "react";
 import Editor from "@/components/Editor";
-import { useEditorStore } from "@/store/useEditorStore";
+import { useEditorStore, clearHistory } from "@/store/useEditorStore";
 import { newId } from "@/lib/ids";
 
 export default function DemoEditor() {
-  const hasPages = useEditorStore((s) => s.order.length > 0);
   const actions = useEditorStore((s) => s.actions);
-  const { openSignIn } = useClerk();
+  const [ready, setReady] = useState(false);
 
-  useEffect(() => {
-    if (hasPages) return;
-    const id = newId("p");
-    actions.addEmptyPage({
-      id,
-      title: "Featured Demo",
-      orientation: "portrait",
-      imageUrl: "/product.png",
-      originalImageUrl: "/product.png",
-      pageType: "coloring",
-    });
-  }, [hasPages, actions]);
+  // Bootstrap demo after mount: reset store, then seed one demo page
+  useLayoutEffect(() => {
+    try {
+      // Clear undo history and state before seeding demo
+      try {
+        clearHistory();
+      } catch {}
+      actions.resetAll();
+      const id = newId("p");
+      actions.addEmptyPage({
+        id,
+        title: "Untitled Page",
+        orientation: "portrait",
+        pageType: "coloring",
+      });
+    } finally {
+      setReady(true);
+    }
+  }, [actions]);
 
-  return (
-    <div className="relative">
-      <div className="absolute inset-x-0 top-0 z-10 grid place-items-center p-2 pointer-events-none">
-        <button
-          className="pointer-events-auto text-xs px-2 py-1 rounded bg-amber-100 text-amber-900 border border-amber-200 underline-offset-2"
-          onClick={() => openSignIn?.({})}
-        >
-          Demo mode — changes here are not saved.{" "}
-          <span className="underline">Sign in</span> to start your own.
-        </button>
-      </div>
-      <Editor />
-    </div>
-  );
+  if (!ready) return null;
+  return <Editor />;
 }

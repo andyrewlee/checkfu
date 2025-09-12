@@ -298,6 +298,7 @@ export default function Editor() {
   const quickGenerateRef = useRef<(id: string) => Promise<void>>(
     async () => {},
   );
+  // Editor now always mounts under <SignedIn>. No conditional early returns.
   // Keep current page visible in the sidebar
   useAutoScrollIntoView(currentPageId);
 
@@ -336,6 +337,10 @@ export default function Editor() {
   );
 
   const [projectId, setProjectId] = useState<string | null>(null);
+  const isLocalPageId = (id: string) =>
+    id.startsWith("p_") || id.startsWith("tmp");
+  const isLocalNodeId = (id: string) =>
+    id.startsWith("t_") || id.startsWith("img") || id.startsWith("imgph");
   // Fetch full project once we have an id
   const projectFull = useQuery(
     apiAny.projects?.getProjectFull ?? apiAny.explore?.getProjectFull,
@@ -442,6 +447,7 @@ export default function Editor() {
     (child: TextChild | ImageChild) => {
       const id = child.id;
       if (!id) return;
+      if (!isSignedIn || isLocalNodeId(id)) return;
       const prev = nodeUpdateTimersRef.current[id];
       if (prev) clearTimeout(prev);
       nodeUpdateTimersRef.current[id] = window.setTimeout(async () => {
@@ -480,7 +486,7 @@ export default function Editor() {
         }
       }, 250);
     },
-    [updateTextNodeMutation, updateImageNodeMutation],
+    [updateTextNodeMutation, updateImageNodeMutation, isSignedIn],
   );
 
   // Debounced page meta updates (title/orientation/position)
@@ -488,6 +494,7 @@ export default function Editor() {
   const pendingPagePatchRef = useRef<Record<string, Partial<Page>>>({});
   const schedulePageUpdate = useCallback(
     (pageId: string, patch: Partial<Page>) => {
+      if (!isSignedIn) return;
       if (pageId.startsWith("p_") || pageId.startsWith("tmp")) return;
       pendingPagePatchRef.current[pageId] = {
         ...(pendingPagePatchRef.current[pageId] || {}),
@@ -513,7 +520,7 @@ export default function Editor() {
         }
       }, 300);
     },
-    [updatePageMetaMutation],
+    [updatePageMetaMutation, isSignedIn],
   );
 
   // Small helper: queue a toast (not related to undo but used in flows)
@@ -724,14 +731,16 @@ export default function Editor() {
               if (!isPageOpCurrent(pageId, op)) return;
               const label = cleanSingleLineLabel(out);
               nextChildren[i] = { ...(tc as TextChild), text: label };
-              // Persist text update
-              try {
-                await updateTextNodeMutation({
-                  nodeId: tc.id,
-                  content: label,
-                });
-              } catch {
-                /* best effort */
+              // Persist text update when signed in
+              if (isSignedIn && !isLocalNodeId(tc.id)) {
+                try {
+                  await updateTextNodeMutation({
+                    nodeId: tc.id,
+                    content: label,
+                  });
+                } catch {
+                  /* best effort */
+                }
               }
             } catch {
               /* ignore individual failure */
@@ -816,6 +825,7 @@ export default function Editor() {
       isPageOpCurrent,
       ensurePaid,
       updateTextNodeMutation,
+      isSignedIn,
     ],
   );
 
@@ -995,7 +1005,9 @@ export default function Editor() {
     (pageId: string) => {
       if (!confirm("Delete this node?")) return;
       // Delete in Convex as well (best-effort)
-      void deletePageMutation({ pageId });
+      if (isSignedIn && !isLocalPageId(pageId)) {
+        void deletePageMutation({ pageId });
+      }
       const s = useEditorStore.getState();
       const incoming = s.edges.filter((e) => e.target === pageId);
       const preferred =
@@ -1004,7 +1016,7 @@ export default function Editor() {
       setNodes((ns) => ns.filter((n) => n.id !== pageId));
       if (currentPageId === pageId) actions.setCurrentPage(preferred);
     },
-    [currentPageId, setNodes, actions, deletePageMutation],
+    [currentPageId, setNodes, actions, deletePageMutation, isSignedIn],
   );
   useEffect(() => {
     deleteNodeRef.current = deleteNode;
@@ -1062,6 +1074,9 @@ export default function Editor() {
               height: number;
             }) => {
               try {
+                if (!isSignedIn || isLocalPageId(pageId)) {
+                  return newId("t");
+                }
                 const id = await addTextNodeMutation({
                   pageId,
                   x,
@@ -1099,6 +1114,9 @@ export default function Editor() {
               height: number;
             }) => {
               try {
+                if (!isSignedIn || isLocalPageId(pageId)) {
+                  return newId("imgph");
+                }
                 const id = await addImageNodeMutation({
                   pageId,
                   x,
@@ -1142,6 +1160,7 @@ export default function Editor() {
     addTextNodeMutation,
     addImageNodeMutation,
     scheduleNodeUpdate,
+    isSignedIn,
   ]);
 
   // Drop & paste handlers and keyboard shortcuts via hooks
@@ -1434,7 +1453,24 @@ export default function Editor() {
               title="Create a new page"
               onClick={() => {
                 (async () => {
-                  if (!projectId) return;
+                  // In demo (no projectId or unsigned), create a local page only
+                  if (!projectId || !isSignedIn) {
+                    const p: Page = {
+                      id: newId("p"),
+                      title: "New Page",
+                      orientation: "portrait",
+                      bwThreshold: DEFAULT_THRESHOLD,
+                      pageType: "coloring",
+                      coloringStyle: "classic",
+                      standards: [],
+                      systemPrompt: "",
+                      systemPromptEdited: false,
+                      children: [],
+                      selectedChildId: null,
+                    };
+                    (actions as any).addEmptyPage?.(p);
+                    return;
+                  }
                   try {
                     const pageId = await createPageMutation({
                       projectId,
@@ -2082,8 +2118,11 @@ export default function Editor() {
                                     ).filter((c) => c.id !== cid),
                                     selectedChildId: null,
                                   });
-                                  // Persist to Convex
-                                  void deleteChildNodeMutation({ nodeId: cid });
+                                  // Persist to Convex (signed-in only)
+                                  if (isSignedIn && !isLocalNodeId(cid))
+                                    void deleteChildNodeMutation({
+                                      nodeId: cid,
+                                    });
                                 }}
                               >
                                 Delete Text
@@ -2227,8 +2266,11 @@ export default function Editor() {
                                     ).filter((c) => c.id !== cid),
                                     selectedChildId: null,
                                   });
-                                  // Persist to Convex
-                                  void deleteChildNodeMutation({ nodeId: cid });
+                                  // Persist to Convex (signed-in only)
+                                  if (isSignedIn && !isLocalNodeId(cid))
+                                    void deleteChildNodeMutation({
+                                      nodeId: cid,
+                                    });
                                 }}
                               >
                                 Delete Image
