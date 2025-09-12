@@ -127,6 +127,7 @@ type EditorActions = {
   // Graph actions
   addEdge: (source: string, target: string) => string;
   removeEdgesByIds: (ids: string[]) => void;
+  setEdges: (edges: GraphEdge[]) => void;
   branch: (parentId: string, prompt: string) => string; // atomic: add page + edge
   deletePageWithReattach: (
     id: string,
@@ -263,6 +264,7 @@ export const useEditorStore = create<Store>()(
         },
         removeEdgesByIds: (ids) =>
           set((s) => ({ edges: s.edges.filter((e) => !ids.includes(e.id)) })),
+        setEdges: (edges) => set(() => ({ edges })),
 
         branch: (parentId, prompt) => {
           const parent = get().pages[parentId];

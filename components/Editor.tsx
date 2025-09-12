@@ -331,6 +331,9 @@ export default function Editor() {
   const deleteChildNodeMutation = useMutation(
     apiAny.nodes?.deleteNode ?? apiAny.explore?.deleteNode,
   );
+  const branchPageMutation = useMutation(
+    apiAny.pages?.branchPage ?? apiAny.explore?.branchPage,
+  );
 
   const [projectId, setProjectId] = useState<string | null>(null);
   // Fetch full project once we have an id
@@ -365,6 +368,7 @@ export default function Editor() {
     } | null;
     if (!f) return;
     // Simple hydration: add pages and children into store
+    const posPatch: Record<string, { x: number; y: number }> = {};
     for (const p of f.pages) {
       const pageIdStr = p._id as string;
       const pageTitle = p.title as string;
@@ -374,6 +378,10 @@ export default function Editor() {
         title: pageTitle,
         orientation: pageOrientation,
       });
+      // Capture persisted graph position
+      if (typeof p.x === "number" && typeof p.y === "number") {
+        posPatch[pageIdStr] = { x: Math.round(p.x), y: Math.round(p.y) };
+      }
       const nodes = (f.nodesByPage[pageIdStr] || []) as any[];
       const children = nodes.map((n) => {
         if (n.kind === "text") {
@@ -408,13 +416,23 @@ export default function Editor() {
             locked: false,
             z: n.z || 0,
             src: undefined,
-            placeholder: true,
+            placeholder: !!n.placeholder,
             crop: null,
           } as ImageChild;
         }
       });
       (actions as any).replaceChildren?.(pageIdStr, children);
     }
+    if (Object.keys(posPatch).length) {
+      (actions as any).setNodePositions?.(posPatch);
+    }
+    // Load edges (use a dedicated setter so ids match DB ids)
+    const edgeList = (f.edges || []).map((e: any) => ({
+      id: e._id as string,
+      source: e.srcPageId as string,
+      target: e.dstPageId as string,
+    }));
+    if ((actions as any).setEdges) (actions as any).setEdges(edgeList);
     hydratedRef.current = true;
   }, [projectFull, actions]);
 
@@ -690,7 +708,7 @@ export default function Editor() {
         // Build next state in memory, then commit once
         const nextChildren = [...(page.children || [])];
 
-        // 1) texts
+        // 1) texts (persist to Convex as we update)
         for (let i = 0; i < nextChildren.length; i++) {
           const c = nextChildren[i];
           if (c.type === "text") {
@@ -706,6 +724,15 @@ export default function Editor() {
               if (!isPageOpCurrent(pageId, op)) return;
               const label = cleanSingleLineLabel(out);
               nextChildren[i] = { ...(tc as TextChild), text: label };
+              // Persist text update
+              try {
+                await updateTextNodeMutation({
+                  nodeId: tc.id,
+                  content: label,
+                });
+              } catch {
+                /* best effort */
+              }
             } catch {
               /* ignore individual failure */
             }
@@ -782,7 +809,14 @@ export default function Editor() {
         writeUI(() => setPagePatch(pageId, { generating: false, status: "" }));
       }
     },
-    [buildInstruction, setPagePatch, beginPageOp, isPageOpCurrent, ensurePaid],
+    [
+      buildInstruction,
+      setPagePatch,
+      beginPageOp,
+      isPageOpCurrent,
+      ensurePaid,
+      updateTextNodeMutation,
+    ],
   );
 
   // Define branching after generateInto so dependencies are valid
@@ -790,18 +824,83 @@ export default function Editor() {
     async (parentId: string, prompt: string) => {
       const allowed = await ensurePaid("branch");
       if (!allowed) return;
-      const childId = (actions as any).branch?.(parentId, prompt);
-      if (!childId) return;
-      actions.setCurrentPage(childId);
-      const parent = useEditorStore.getState().pages[parentId];
-      // Small delay so Undo immediately after branch removes the page in one step
-      // (generation writes are cancelled if the page disappears)
-      setTimeout(() => {
-        if (!useEditorStore.getState().pages[childId]) return; // page deleted via undo
-        void generateInto(childId, prompt, { ...parent, id: childId, prompt });
-      }, 350);
+      try {
+        const res = (await branchPageMutation({
+          parentPageId: parentId,
+          prompt,
+        })) as any;
+        const childId = (res?.pageId as string) || null;
+        if (!childId) return;
+        const parent = useEditorStore.getState().pages[parentId];
+        // Add page locally with same meta used on server
+        const childTitle = `${parent?.title || "Page"} variant`;
+        (actions as any).addEmptyPage?.({
+          id: childId,
+          title: childTitle,
+          orientation: parent?.orientation || "portrait",
+        });
+        // Add edge locally for immediate graph update
+        (actions as any).addEdge?.(parentId, childId);
+        // Position child next to parent locally
+        try {
+          const pos = useEditorStore.getState().nodePositions[parentId];
+          if (pos)
+            (actions as any).setNodePositions?.({
+              [childId]: { x: pos.x + 280, y: pos.y },
+            });
+        } catch {}
+        // Map returned nodes into local children array
+        const nodes = (res?.nodes || []) as any[];
+        const children = nodes.map((n) => {
+          if (n.kind === "text") {
+            return {
+              id: n._id as string,
+              type: "text",
+              x: n.x,
+              y: n.y,
+              width: n.width,
+              height: n.height,
+              angle: n.rotation || 0,
+              visible: true,
+              locked: false,
+              z: n.z || 0,
+              text: n.content || "",
+              fontFamily: n.style?.fontFamily || "Inter",
+              fontSize: n.style?.fontSize || 24,
+              fontWeight: n.style?.bold ? "bold" : "normal",
+              italic: !!n.style?.italic,
+              align: (n.style?.align as any) || "left",
+            } as TextChild;
+          } else {
+            return {
+              id: n._id as string,
+              type: "image",
+              x: n.x,
+              y: n.y,
+              width: n.width,
+              height: n.height,
+              angle: n.rotation || 0,
+              visible: true,
+              locked: false,
+              z: n.z || 0,
+              src: undefined,
+              placeholder: !!n.placeholder,
+              crop: null,
+            } as ImageChild;
+          }
+        });
+        (actions as any).replaceChildren?.(childId, children);
+        actions.setCurrentPage(childId);
+        // Small delay so Undo immediately after branch removes the page in one step
+        setTimeout(() => {
+          if (!useEditorStore.getState().pages[childId]) return;
+          void generateInto(childId, prompt);
+        }, 350);
+      } catch (e) {
+        console.warn("branchPage failed", e);
+      }
     },
-    [actions, generateInto, ensurePaid],
+    [actions, branchPageMutation, generateInto, ensurePaid],
   );
   useEffect(() => {
     branchFromWithPromptRef.current = branchFromWithPrompt;
