@@ -21,6 +21,15 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import {
+  useAuth,
+  useClerk,
+  SignedIn,
+  SignedOut,
+  UserButton,
+  SignInButton,
+} from "@clerk/nextjs";
+import { useSubscription } from "@clerk/nextjs/experimental";
+import {
   generateColoringBookImage,
   transformImageWithPrompt,
   generateTextContent,
@@ -179,6 +188,41 @@ function useGeminiApiKeyNeeded() {
 }
 
 export default function Editor() {
+  // Client gating: require sign-in + active subscription (server still enforces)
+  const { isSignedIn } = useAuth();
+  const { openSignIn, openUserProfile } = useClerk();
+  const {
+    data: subscription,
+    isLoading: subLoading,
+    error: subError,
+  } = useSubscription();
+
+  const status = (subscription as any)?.status as string | undefined;
+  const hasActivePlan = status === "active" || status === "trialing";
+
+  const ensurePaid = useCallback(
+    async (purpose: "generate" | "branch" | "export") => {
+      console.log("purpose", purpose);
+      if (!isSignedIn) {
+        openSignIn?.({});
+        return false;
+      }
+      if (subLoading) return false;
+      if (subError || !hasActivePlan) {
+        openUserProfile?.();
+        return false;
+      }
+      return true;
+    },
+    [
+      isSignedIn,
+      subLoading,
+      subError,
+      hasActivePlan,
+      openSignIn,
+      openUserProfile,
+    ],
+  );
   const pages = usePages();
   const currentPageId = useCurrentPageId();
   const currentPage = useCurrentPage();
@@ -362,34 +406,44 @@ export default function Editor() {
   );
   const [branchPrompt, setBranchPrompt] = useState<string>("");
 
-  const branchFrom = useCallback((parentId: string) => {
-    const parent = useEditorStore.getState().pages[parentId];
-    if (!parent) return;
-    setBranchingParentId(parentId);
-    setBranchPrompt(parent.prompt || "");
-  }, []);
+  const branchFrom = useCallback(
+    async (parentId: string) => {
+      const ok = await ensurePaid("branch");
+      if (!ok) return;
+      const parent = useEditorStore.getState().pages[parentId];
+      if (!parent) return;
+      setBranchingParentId(parentId);
+      setBranchPrompt(parent.prompt || "");
+    },
+    [ensurePaid],
+  );
   useEffect(() => {
     branchFromRef.current = branchFrom;
   }, [branchFrom]);
 
   // branchFromWithPrompt is defined later (after generateInto) to avoid TS hoisting complaints
 
-  const quickGenerate = useCallback(async (pageId: string) => {
-    const page = useEditorStore.getState().pages[pageId];
-    if (!page) return;
-    const now = Date.now();
-    if (now - lastQuickGenAtRef.current < 1200) {
-      return;
-    }
-    lastQuickGenAtRef.current = now;
-    const prompt = (page.prompt || "").trim();
-    if (!prompt) {
-      setBranchingParentId(pageId);
-      setBranchPrompt("");
-      return;
-    }
-    await branchFromWithPromptRef.current(pageId, prompt);
-  }, []);
+  const quickGenerate = useCallback(
+    async (pageId: string) => {
+      const allowed = await ensurePaid("generate");
+      if (!allowed) return;
+      const page = useEditorStore.getState().pages[pageId];
+      if (!page) return;
+      const now = Date.now();
+      if (now - lastQuickGenAtRef.current < 1200) {
+        return;
+      }
+      lastQuickGenAtRef.current = now;
+      const prompt = (page.prompt || "").trim();
+      if (!prompt) {
+        setBranchingParentId(pageId);
+        setBranchPrompt("");
+        return;
+      }
+      await branchFromWithPromptRef.current(pageId, prompt);
+    },
+    [ensurePaid],
+  );
   useEffect(() => {
     quickGenerateRef.current = quickGenerate;
   }, [quickGenerate]);
@@ -412,6 +466,8 @@ export default function Editor() {
   // per-page op token before every state write. See beginPageOp/isPageOpCurrent.
   const generateInto = useCallback(
     async (pageId: string, prompt: string, pageOverride?: Page) => {
+      const allowed = await ensurePaid("generate");
+      if (!allowed) return;
       try {
         const page = pageOverride ?? useEditorStore.getState().pages[pageId]!;
         const op = beginPageOp(pageId);
@@ -517,12 +573,14 @@ export default function Editor() {
         writeUI(() => setPagePatch(pageId, { generating: false, status: "" }));
       }
     },
-    [buildInstruction, setPagePatch, beginPageOp, isPageOpCurrent],
+    [buildInstruction, setPagePatch, beginPageOp, isPageOpCurrent, ensurePaid],
   );
 
   // Define branching after generateInto so dependencies are valid
   const branchFromWithPrompt = useCallback(
     async (parentId: string, prompt: string) => {
+      const allowed = await ensurePaid("branch");
+      if (!allowed) return;
       const childId = (actions as any).branch?.(parentId, prompt);
       if (!childId) return;
       actions.setCurrentPage(childId);
@@ -534,7 +592,7 @@ export default function Editor() {
         void generateInto(childId, prompt, { ...parent, id: childId, prompt });
       }, 350);
     },
-    [actions, generateInto],
+    [actions, generateInto, ensurePaid],
   );
   useEffect(() => {
     branchFromWithPromptRef.current = branchFromWithPrompt;
@@ -749,7 +807,7 @@ export default function Editor() {
     <div className="h-screen w-screen overflow-hidden bg-background text-foreground">
       {/* Top bar */}
       <header
-        className="h-14 px-4 border-b border-slate-200 bg-sky-50/60 backdrop-blur flex items-center justify-between"
+        className="h-14 px-4 border-b border-slate-200 bg-sky-50/60 backdrop-blur flex items-center justify-between relative z-20"
         role="toolbar"
         aria-label="Editor top bar"
       >
@@ -839,6 +897,7 @@ export default function Editor() {
             aria-busy={exporting}
             disabled={!pages.length || exporting}
             onClick={async () => {
+              if (!(await ensurePaid("export"))) return;
               const selected = nodes
                 .filter((n) => n.selected)
                 .map((n) => useEditorStore.getState().pages[n.id])
@@ -917,6 +976,18 @@ export default function Editor() {
             </svg>
             {needsApiKey ? "Add API Key" : "API Key"}
           </button>
+          <div className="ml-2 pl-2 border-l flex items-center">
+            <SignedOut>
+              <SignInButton mode="modal">
+                <button className="inline-flex h-9 items-center gap-2 px-3 rounded-md border text-sm transition hover:bg-slate-50 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500">
+                  Sign in
+                </button>
+              </SignInButton>
+            </SignedOut>
+            <SignedIn>
+              <UserButton />
+            </SignedIn>
+          </div>
         </div>
       </header>
 
@@ -1497,6 +1568,8 @@ export default function Editor() {
                                 className="px-2 py-1 border rounded disabled:opacity-50 w-max"
                                 disabled={generatingAny}
                                 onClick={async () => {
+                                  const ok = await ensurePaid("generate");
+                                  if (!ok) return;
                                   const promptText = (
                                     nodePrompts[child.id] ?? ""
                                   ).trim();
@@ -1617,6 +1690,8 @@ export default function Editor() {
                               <button
                                 className="px-2 py-1 border rounded text-xs"
                                 onClick={async () => {
+                                  const ok = await ensurePaid("generate");
+                                  if (!ok) return;
                                   try {
                                     setPagePatch(currentPageId!, {
                                       generating: true,
