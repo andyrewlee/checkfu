@@ -470,6 +470,7 @@ export default function Editor() {
   const pendingPagePatchRef = useRef<Record<string, Partial<Page>>>({});
   const schedulePageUpdate = useCallback(
     (pageId: string, patch: Partial<Page>) => {
+      if (pageId.startsWith("p_") || pageId.startsWith("tmp")) return;
       pendingPagePatchRef.current[pageId] = {
         ...(pendingPagePatchRef.current[pageId] || {}),
         ...patch,
