@@ -15,6 +15,9 @@ import type {
 } from "convex/server";
 import type * as explore from "../explore.js";
 import type * as myFunctions from "../myFunctions.js";
+import type * as nodes from "../nodes.js";
+import type * as pages from "../pages.js";
+import type * as projects from "../projects.js";
 import type * as users from "../users.js";
 
 /**
@@ -28,6 +31,9 @@ import type * as users from "../users.js";
 declare const fullApi: ApiFromModules<{
   explore: typeof explore;
   myFunctions: typeof myFunctions;
+  nodes: typeof nodes;
+  pages: typeof pages;
+  projects: typeof projects;
   users: typeof users;
 }>;
 export declare const api: FilterApi<

@@ -52,6 +52,8 @@ import { jsPDF } from "jspdf";
 import PageNode, { type PageNodeData } from "@/components/nodes/PageNode";
 import { newId } from "@/lib/ids";
 import { revokeIfBlob } from "@/lib/url";
+import { useMutation, useQuery } from "convex/react";
+import { api as generatedApi } from "@/convex/_generated/api";
 // Layers panel removed from Inspector to focus on a single selection
 import {
   useActions,
@@ -237,6 +239,21 @@ export default function Editor() {
     target: e.target,
   }));
   const [showSettings, setShowSettings] = useState(false);
+  const [suppressCommitSeqByPage, setSuppressCommitSeqByPage] = useState<
+    Record<string, number>
+  >({});
+  const [removeChildIdByPage, setRemoveChildIdByPage] = useState<
+    Record<string, string | null>
+  >({});
+  const [removeChildSeqByPage, setRemoveChildSeqByPage] = useState<
+    Record<string, number>
+  >({});
+  const [blockChildIdByPage, setBlockChildIdByPage] = useState<
+    Record<string, string | null>
+  >({});
+  const [blockChildSeqByPage, setBlockChildSeqByPage] = useState<
+    Record<string, number>
+  >({});
   // Loaded CCSS Kindergarten standards catalog (code + description)
   const [standardsCatalog, setStandardsCatalog] = useState<
     { code: string; description: string }[]
@@ -298,6 +315,202 @@ export default function Editor() {
   // Keep current page visible in the sidebar
   useAutoScrollIntoView(currentPageId);
 
+  // Convex bindings (cast to any until `npx convex dev` regenerates types)
+  const apiAny = generatedApi as any;
+  const getOrCreateMyProject = useMutation(
+    apiAny.projects?.getOrCreateMyProject ??
+      apiAny.explore?.getOrCreateMyProject,
+  );
+  const createPageMutation = useMutation(
+    apiAny.pages?.createPage ?? apiAny.explore?.createPage,
+  );
+  const updatePageMetaMutation = useMutation(
+    apiAny.pages?.updatePageMeta ?? apiAny.explore?.updatePageMeta,
+  );
+  const addTextNodeMutation = useMutation(
+    apiAny.nodes?.addTextNode ?? apiAny.explore?.addTextNode,
+  );
+  const addImageNodeMutation = useMutation(
+    apiAny.nodes?.addImageNode ?? apiAny.explore?.addImageNode,
+  );
+  const updateTextNodeMutation = useMutation(
+    apiAny.nodes?.updateTextNode ?? apiAny.explore?.updateTextNode,
+  );
+  const updateImageNodeMutation = useMutation(
+    apiAny.nodes?.updateImageNode ?? apiAny.explore?.updateImageNode,
+  );
+  const deletePageMutation = useMutation(
+    apiAny.pages?.deletePageDeep ?? apiAny.explore?.deletePageDeep,
+  );
+  const deleteChildNodeMutation = useMutation(
+    apiAny.nodes?.deleteNode ?? apiAny.explore?.deleteNode,
+  );
+
+  const [projectId, setProjectId] = useState<string | null>(null);
+  // Fetch full project once we have an id
+  const projectFull = useQuery(
+    apiAny.projects?.getProjectFull ?? apiAny.explore?.getProjectFull,
+    projectId ? { projectId } : "skip",
+  ) as any;
+
+  // On mount for signed-in users: get or create their project
+  useEffect(() => {
+    (async () => {
+      if (!isSignedIn) return;
+      if (projectId) return;
+      try {
+        const id = await getOrCreateMyProject({});
+        setProjectId(id as string);
+      } catch (e) {
+        console.warn("getOrCreateMyProject failed", e);
+      }
+    })();
+  }, [isSignedIn, projectId, getOrCreateMyProject]);
+
+  // Hydrate store from server the first time
+  const hydratedRef = useRef(false);
+  useEffect(() => {
+    if (!projectFull || hydratedRef.current) return;
+    const f = projectFull as {
+      project: any;
+      pages: any[];
+      edges: any[];
+      nodesByPage: Record<string, any[]>;
+    } | null;
+    if (!f) return;
+    // Simple hydration: add pages and children into store
+    for (const p of f.pages) {
+      const pageIdStr = p._id as string;
+      const pageTitle = p.title as string;
+      const pageOrientation = (p.orientation as any) || "portrait";
+      (actions as any).addEmptyPage?.({
+        id: pageIdStr,
+        title: pageTitle,
+        orientation: pageOrientation,
+      });
+      const nodes = (f.nodesByPage[pageIdStr] || []) as any[];
+      const children = nodes.map((n) => {
+        if (n.kind === "text") {
+          return {
+            id: n._id as string,
+            type: "text",
+            x: n.x,
+            y: n.y,
+            width: n.width,
+            height: n.height,
+            angle: n.rotation || 0,
+            visible: true,
+            locked: false,
+            z: n.z || 0,
+            text: n.content || "",
+            fontFamily: n.style?.fontFamily || "Inter",
+            fontSize: n.style?.fontSize || 24,
+            fontWeight: n.style?.bold ? "bold" : "normal",
+            italic: !!n.style?.italic,
+            align: (n.style?.align as any) || "left",
+          } as TextChild;
+        } else {
+          return {
+            id: n._id as string,
+            type: "image",
+            x: n.x,
+            y: n.y,
+            width: n.width,
+            height: n.height,
+            angle: n.rotation || 0,
+            visible: true,
+            locked: false,
+            z: n.z || 0,
+            src: undefined,
+            placeholder: true,
+            crop: null,
+          } as ImageChild;
+        }
+      });
+      (actions as any).replaceChildren?.(pageIdStr, children);
+    }
+    hydratedRef.current = true;
+  }, [projectFull, actions]);
+
+  // Debounced server updates for node changes
+  const nodeUpdateTimersRef = useRef<Record<string, number>>({});
+  const scheduleNodeUpdate = useCallback(
+    (child: TextChild | ImageChild) => {
+      const id = child.id;
+      if (!id) return;
+      const prev = nodeUpdateTimersRef.current[id];
+      if (prev) clearTimeout(prev);
+      nodeUpdateTimersRef.current[id] = window.setTimeout(async () => {
+        try {
+          if (child.type === "text") {
+            await updateTextNodeMutation({
+              nodeId: id,
+              x: child.x,
+              y: child.y,
+              width: child.width,
+              height: child.height,
+              rotation: child.angle || 0,
+              z: child.z || 0,
+              content: child.text,
+              style: {
+                fontFamily: child.fontFamily,
+                fontSize: child.fontSize,
+                bold: child.fontWeight === "bold",
+                italic: !!child.italic,
+                align: child.align || "left",
+              },
+            });
+          } else {
+            await updateImageNodeMutation({
+              nodeId: id,
+              x: child.x,
+              y: child.y,
+              width: child.width,
+              height: child.height,
+              rotation: child.angle || 0,
+              z: child.z || 0,
+            });
+          }
+        } catch (e) {
+          console.warn("node update failed", e);
+        }
+      }, 250);
+    },
+    [updateTextNodeMutation, updateImageNodeMutation],
+  );
+
+  // Debounced page meta updates (title/orientation/position)
+  const pageUpdateTimersRef = useRef<Record<string, number>>({});
+  const pendingPagePatchRef = useRef<Record<string, Partial<Page>>>({});
+  const schedulePageUpdate = useCallback(
+    (pageId: string, patch: Partial<Page>) => {
+      pendingPagePatchRef.current[pageId] = {
+        ...(pendingPagePatchRef.current[pageId] || {}),
+        ...patch,
+      };
+      const prev = pageUpdateTimersRef.current[pageId];
+      if (prev) clearTimeout(prev);
+      pageUpdateTimersRef.current[pageId] = window.setTimeout(async () => {
+        const p = pendingPagePatchRef.current[pageId] || {};
+        try {
+          await updatePageMetaMutation({
+            pageId,
+            title: typeof p.title === "string" ? p.title : undefined,
+            orientation: (p as any).orientation,
+            x: (p as any).x,
+            y: (p as any).y,
+            scale: (p as any).scale,
+          });
+        } catch (e) {
+          console.warn("updatePageMeta failed", e);
+        } finally {
+          delete pendingPagePatchRef.current[pageId];
+        }
+      }, 300);
+    },
+    [updatePageMetaMutation],
+  );
+
   // Small helper: queue a toast (not related to undo but used in flows)
   function pushToast(
     text: string,
@@ -317,7 +530,12 @@ export default function Editor() {
     [actions],
   );
   const onNodeClickStable = useCallback(
-    (_: unknown, n: { id: string }) => actions.setCurrentPage(n.id),
+    (evt: any, n: { id: string }) => {
+      // If the click originated from inside the Fabric canvas, ignore
+      const t = evt?.target as HTMLElement | null;
+      if (t && (t.closest("canvas") || t.closest(".fabric-canvas"))) return;
+      actions.setCurrentPage(n.id);
+    },
     [actions],
   );
 
@@ -345,9 +563,18 @@ export default function Editor() {
       if (patch && Object.keys(patch).length) {
         // Defer store update to avoid nested state updates during render
         queueMicrotask(() => (actions as any).setNodePositions?.(patch!));
+        // Persist page positions to Convex (debounced per page)
+        for (const [pid, pos] of Object.entries(
+          patch as Record<string, { x: number; y: number }>,
+        )) {
+          schedulePageUpdate(pid, {
+            x: Math.round((pos as any).x),
+            y: Math.round((pos as any).y),
+          } as any);
+        }
       }
     },
-    [setNodes, actions],
+    [setNodes, actions, schedulePageUpdate],
   );
 
   const deleteNodes = useCallback(
@@ -686,6 +913,8 @@ export default function Editor() {
   const deleteNode = useCallback(
     (pageId: string) => {
       if (!confirm("Delete this node?")) return;
+      // Delete in Convex as well (best-effort)
+      void deletePageMutation({ pageId });
       const s = useEditorStore.getState();
       const incoming = s.edges.filter((e) => e.target === pageId);
       const preferred =
@@ -694,7 +923,7 @@ export default function Editor() {
       setNodes((ns) => ns.filter((n) => n.id !== pageId));
       if (currentPageId === pageId) actions.setCurrentPage(preferred);
     },
-    [currentPageId, setNodes, actions],
+    [currentPageId, setNodes, actions, deletePageMutation],
   );
   useEffect(() => {
     deleteNodeRef.current = deleteNode;
@@ -712,6 +941,11 @@ export default function Editor() {
     pagesIdsRef.current = idsSig;
     lastCurrentPageIdRef.current = currentPageId;
     setNodes((old) => {
+      const currentHasChildSelected = !!(
+        currentPageId &&
+        (useEditorStore.getState().pages[currentPageId]?.selectedChildId ??
+          null)
+      );
       const next = pages.map((p, i) => {
         const existing = old.find((n) => n.id === p.id);
         const storePos = nodePositions[p.id];
@@ -728,13 +962,102 @@ export default function Editor() {
           dragHandle: ".dragHandlePage",
           data: {
             pageId: p.id,
+            suppressCommitSeq: suppressCommitSeqByPage[p.id] || 0,
+            removeChildId: removeChildIdByPage[p.id] || null,
+            removeChildSeq: removeChildSeqByPage[p.id] || 0,
+            blockChildId: blockChildIdByPage[p.id] || null,
+            blockChildSeq: blockChildSeqByPage[p.id] || 0,
             onBranch: (id: string) => branchFromRef.current(id),
             onBranchWithPrompt: (id: string, prompt: string) =>
               branchFromWithPromptRef.current(id, prompt),
             onQuickGenerate: (id: string) => quickGenerateRef.current(id),
+            onChildrenChange: (
+              pid: string,
+              next: (TextChild | ImageChild)[],
+            ) => {
+              // schedule server updates for each child
+              next.forEach((c) => scheduleNodeUpdate(c));
+            },
+            onChildSelect: (pid: string, childId: string | null) => {
+              if (childId) {
+                setNodes((ns) =>
+                  (ns as any).map((n: any) =>
+                    n.id === pid ? { ...n, selected: false } : n,
+                  ),
+                );
+              }
+            },
+            onCreateText: async ({
+              pageId,
+              x,
+              y,
+              width,
+              height,
+            }: {
+              pageId: string;
+              x: number;
+              y: number;
+              width: number;
+              height: number;
+            }) => {
+              try {
+                const id = await addTextNodeMutation({
+                  pageId,
+                  x,
+                  y,
+                  width,
+                  height,
+                  rotation: 0,
+                  z: 0,
+                  content: "",
+                  style: {
+                    fontFamily: "Inter",
+                    fontSize: 24,
+                    bold: false,
+                    italic: false,
+                    align: "left",
+                  },
+                });
+                return id as string;
+              } catch (e) {
+                console.warn("addTextNode failed", e);
+                return null;
+              }
+            },
+            onCreateImage: async ({
+              pageId,
+              x,
+              y,
+              width,
+              height,
+            }: {
+              pageId: string;
+              x: number;
+              y: number;
+              width: number;
+              height: number;
+            }) => {
+              try {
+                const id = await addImageNodeMutation({
+                  pageId,
+                  x,
+                  y,
+                  width,
+                  height,
+                  rotation: 0,
+                  z: 0,
+                });
+                return id as string;
+              } catch (e) {
+                console.warn("addImageNode failed", e);
+                return null;
+              }
+            },
             onDelete: (id: string) => deleteNodeRef.current(id),
           } as unknown as PageNodeData,
-          selected: existing?.selected ?? p.id === currentPageId,
+          selected: currentHasChildSelected
+            ? false
+            : (existing?.selected ?? p.id === currentPageId),
         } as unknown as PageRFNode;
         return node;
       });
@@ -752,7 +1075,17 @@ export default function Editor() {
         });
       return equal ? old : next;
     });
-  }, [pages, currentPageId, setNodes, nodePositions]);
+  }, [
+    pages,
+    currentPageId,
+    setNodes,
+    nodePositions,
+    suppressCommitSeqByPage,
+    removeChildIdByPage,
+    removeChildSeqByPage,
+    blockChildIdByPage,
+    blockChildSeqByPage,
+  ]);
 
   // Drop & paste handlers and keyboard shortcuts via hooks
   const flowRef = useRef<HTMLDivElement | null>(null);
@@ -770,6 +1103,39 @@ export default function Editor() {
       if (currentPageId) void quickGenerate(currentPageId);
     },
     onDeleteSelected: () => {
+      // If a child is selected in the Inspector, delete only that child
+      const childId =
+        useEditorStore.getState().pages[currentPageId!]?.selectedChildId ??
+        null;
+      if (childId && currentPageId) {
+        // Remove from local store
+        setPagePatch(currentPageId, {
+          children: (
+            useEditorStore.getState().pages[currentPageId].children || []
+          ).filter((c) => c.id !== childId),
+          selectedChildId: null,
+        });
+        // Prevent Fabric commit from resurrecting the deleted child once
+        setSuppressCommitSeqByPage((m) => ({
+          ...m,
+          [currentPageId]: (m[currentPageId] || 0) + 1,
+        }));
+        // Prompt the canvas to remove the object immediately
+        setRemoveChildIdByPage((m) => ({ ...m, [currentPageId]: childId }));
+        setRemoveChildSeqByPage((m) => ({
+          ...m,
+          [currentPageId]: (m[currentPageId] || 0) + 1,
+        }));
+        // Block re-add during next hydration
+        setBlockChildIdByPage((m) => ({ ...m, [currentPageId]: childId }));
+        setBlockChildSeqByPage((m) => ({
+          ...m,
+          [currentPageId]: (m[currentPageId] || 0) + 1,
+        }));
+        // Best-effort server delete
+        void deleteChildNodeMutation({ nodeId: childId });
+        return;
+      }
       const selected = nodes.filter((n) => n.selected).map((n) => n.id);
       if (selected.length > 1) deleteNodes(selected);
       else if (currentPageId) deleteNode(currentPageId);
@@ -1043,21 +1409,34 @@ export default function Editor() {
               className="px-2 py-1 text-sm border rounded inline-flex items-center gap-1"
               title="Create a new page"
               onClick={() => {
-                const id = newId("p");
-                const p: Page = {
-                  id,
-                  title: "New Page",
-                  orientation: "portrait",
-                  bwThreshold: DEFAULT_THRESHOLD,
-                  pageType: "coloring",
-                  coloringStyle: "classic",
-                  standards: [],
-                  systemPrompt: "",
-                  systemPromptEdited: false,
-                  children: [],
-                  selectedChildId: null,
-                };
-                (actions as any).addEmptyPage?.(p);
+                (async () => {
+                  if (!projectId) return;
+                  try {
+                    const pageId = await createPageMutation({
+                      projectId,
+                      title: "New Page",
+                      kind: "coloring",
+                      x: 0,
+                      y: 0,
+                    });
+                    const p: Page = {
+                      id: pageId as string,
+                      title: "New Page",
+                      orientation: "portrait",
+                      bwThreshold: DEFAULT_THRESHOLD,
+                      pageType: "coloring",
+                      coloringStyle: "classic",
+                      standards: [],
+                      systemPrompt: "",
+                      systemPromptEdited: false,
+                      children: [],
+                      selectedChildId: null,
+                    };
+                    (actions as any).addEmptyPage?.(p);
+                  } catch (e) {
+                    console.warn("createPage failed", e);
+                  }
+                })();
                 // setCurrentPage is already done inside addEmptyPage; avoid redundant set
               }}
             >
@@ -1262,20 +1641,24 @@ export default function Editor() {
                       id="page-title"
                       className="border rounded px-2 py-1"
                       value={currentPage?.title || ""}
-                      onChange={(e) =>
-                        setPagePatch(currentPageId!, { title: e.target.value })
-                      }
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setPagePatch(currentPageId!, { title: val });
+                        schedulePageUpdate(currentPageId!, { title: val });
+                      }}
                     />
                     <label htmlFor="page-orientation">Orientation</label>
                     <select
                       id="page-orientation"
                       className="border rounded px-2 py-1"
                       value={currentPage?.orientation || "portrait"}
-                      onChange={(e) =>
-                        setPagePatch(currentPageId!, {
-                          orientation: e.target.value as Orientation,
-                        })
-                      }
+                      onChange={(e) => {
+                        const val = e.target.value as Orientation;
+                        setPagePatch(currentPageId!, { orientation: val });
+                        schedulePageUpdate(currentPageId!, {
+                          orientation: val,
+                        } as any);
+                      }}
                     >
                       <option value="portrait">Portrait</option>
                       <option value="landscape">Landscape</option>
@@ -1325,6 +1708,7 @@ export default function Editor() {
                                     c.id === child.id ? { ...c, x: v } : c,
                                 ),
                               });
+                              scheduleNodeUpdate({ ...(child as any), x: v });
                             }}
                           />
                           <label className="text-xs">Y</label>
@@ -1342,6 +1726,7 @@ export default function Editor() {
                                     c.id === child.id ? { ...c, y: v } : c,
                                 ),
                               });
+                              scheduleNodeUpdate({ ...(child as any), y: v });
                             }}
                           />
                           <label className="text-xs">Width</label>
@@ -1363,6 +1748,11 @@ export default function Editor() {
                                     c.id === child.id ? { ...c, width: v } : c,
                                 ),
                               });
+                              if (!isText)
+                                scheduleNodeUpdate({
+                                  ...(child as any),
+                                  width: v,
+                                });
                             }}
                           />
                           <label className="text-xs">Height</label>
@@ -1386,6 +1776,11 @@ export default function Editor() {
                                     c.id === child.id ? { ...c, height: v } : c,
                                 ),
                               });
+                              if (!isText)
+                                scheduleNodeUpdate({
+                                  ...(child as any),
+                                  height: v,
+                                });
                             }}
                           />
                           <label className="text-xs">Angle</label>
@@ -1487,6 +1882,12 @@ export default function Editor() {
                                     ),
                                   })
                                 }
+                                onBlur={(e) => {
+                                  scheduleNodeUpdate({
+                                    ...(child as any),
+                                    text: e.currentTarget.value,
+                                  } as any);
+                                }}
                                 onKeyDown={(e) => {
                                   if (
                                     (e.metaKey || e.ctrlKey) &&
@@ -1524,6 +1925,15 @@ export default function Editor() {
                                     ),
                                   })
                                 }
+                                onBlur={(e) => {
+                                  const v = parseFloat(
+                                    e.currentTarget.value || "24",
+                                  );
+                                  scheduleNodeUpdate({
+                                    ...(child as any),
+                                    fontSize: v,
+                                  } as any);
+                                }}
                               />
                               <label className="text-xs">Align</label>
                               <select
@@ -1543,6 +1953,14 @@ export default function Editor() {
                                     ),
                                   })
                                 }
+                                onBlur={(e) => {
+                                  const v = e.currentTarget
+                                    .value as TextChild["align"];
+                                  scheduleNodeUpdate({
+                                    ...(child as any),
+                                    align: v,
+                                  } as any);
+                                }}
                               >
                                 <option value="left">Left</option>
                                 <option value="center">Center</option>
@@ -1627,6 +2045,46 @@ export default function Editor() {
                                 }}
                               >
                                 {generatingAny ? "Generating…" : "Generate"}
+                              </button>
+                            </div>
+                            <div>
+                              <button
+                                className="mt-1 px-2 py-1 border rounded text-xs text-red-700 border-red-300"
+                                onClick={() => {
+                                  const cid = child.id;
+                                  setPagePatch(currentPageId!, {
+                                    children: (
+                                      currentPage.children || []
+                                    ).filter((c) => c.id !== cid),
+                                    selectedChildId: null,
+                                  });
+                                  setSuppressCommitSeqByPage((m) => ({
+                                    ...m,
+                                    [currentPageId!]:
+                                      (m[currentPageId!] || 0) + 1,
+                                  }));
+                                  setRemoveChildIdByPage((m) => ({
+                                    ...m,
+                                    [currentPageId!]: cid,
+                                  }));
+                                  setRemoveChildSeqByPage((m) => ({
+                                    ...m,
+                                    [currentPageId!]:
+                                      (m[currentPageId!] || 0) + 1,
+                                  }));
+                                  setBlockChildIdByPage((m) => ({
+                                    ...m,
+                                    [currentPageId!]: cid,
+                                  }));
+                                  setBlockChildSeqByPage((m) => ({
+                                    ...m,
+                                    [currentPageId!]:
+                                      (m[currentPageId!] || 0) + 1,
+                                  }));
+                                  void deleteChildNodeMutation({ nodeId: cid });
+                                }}
+                              >
+                                Delete Text
                               </button>
                             </div>
                           </div>
@@ -1754,6 +2212,46 @@ export default function Editor() {
                                 }}
                               >
                                 Generate
+                              </button>
+                            </div>
+                            <div>
+                              <button
+                                className="mt-1 px-2 py-1 border rounded text-xs text-red-700 border-red-300"
+                                onClick={() => {
+                                  const cid = child.id;
+                                  setPagePatch(currentPageId!, {
+                                    children: (
+                                      currentPage.children || []
+                                    ).filter((c) => c.id !== cid),
+                                    selectedChildId: null,
+                                  });
+                                  setSuppressCommitSeqByPage((m) => ({
+                                    ...m,
+                                    [currentPageId!]:
+                                      (m[currentPageId!] || 0) + 1,
+                                  }));
+                                  setRemoveChildIdByPage((m) => ({
+                                    ...m,
+                                    [currentPageId!]: cid,
+                                  }));
+                                  setRemoveChildSeqByPage((m) => ({
+                                    ...m,
+                                    [currentPageId!]:
+                                      (m[currentPageId!] || 0) + 1,
+                                  }));
+                                  setBlockChildIdByPage((m) => ({
+                                    ...m,
+                                    [currentPageId!]: cid,
+                                  }));
+                                  setBlockChildSeqByPage((m) => ({
+                                    ...m,
+                                    [currentPageId!]:
+                                      (m[currentPageId!] || 0) + 1,
+                                  }));
+                                  void deleteChildNodeMutation({ nodeId: cid });
+                                }}
+                              >
+                                Delete Image
                               </button>
                             </div>
                           </div>

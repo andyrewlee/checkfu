@@ -25,6 +25,28 @@ type Props = {
   selectedChildId: string | null;
   onChildrenChange: (pageId: string, next: (TextChild | ImageChild)[]) => void;
   onSelectChild: (pageId: string, childId: string | null) => void;
+  onCreateText?: (args: {
+    pageId: string;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  }) => Promise<string | null>;
+  onCreateImage?: (args: {
+    pageId: string;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  }) => Promise<string | null>;
+  // When this increments, the next internal commit() is skipped once.
+  suppressCommitSeq?: number;
+  // Imperative removal of a child object by id (one-shot when seq changes)
+  removeChildId?: string | null;
+  removeChildSeq?: number;
+  // Skip adding an item with this id during the next hydration pass
+  blockChildId?: string | null;
+  blockChildSeq?: number;
 };
 
 export default function PageCanvasFabric(props: Props) {
@@ -36,6 +58,17 @@ export default function PageCanvasFabric(props: Props) {
     onChildrenChange,
     onSelectChild,
   } = props;
+  const onCreateText = props.onCreateText;
+  const onCreateImage = props.onCreateImage;
+  const suppressCommitSeq = props.suppressCommitSeq || 0;
+  const suppressSeqRef = useRef(0);
+  const lastSuppressedRef = useRef(0);
+  suppressSeqRef.current = suppressCommitSeq;
+  const blockIdRef = useRef<string | null>(null);
+  const blockSeqRef = useRef(0);
+  const lastBlockSeqRef = useRef(0);
+  blockIdRef.current = props.blockChildId ?? null;
+  blockSeqRef.current = props.blockChildSeq ?? 0;
   const canvasElRef = useRef<HTMLCanvasElement | null>(null);
   const fabricRef = useRef<any | null>(null);
   const textChangeTimerRef = useRef<number | null>(null);
@@ -88,6 +121,14 @@ export default function PageCanvasFabric(props: Props) {
 
       const commit = () => {
         if (isHydrating()) return;
+        // Skip one commit cycle if parent requested (prevents resurrecting deleted child)
+        if (
+          suppressSeqRef.current &&
+          suppressSeqRef.current !== lastSuppressedRef.current
+        ) {
+          lastSuppressedRef.current = suppressSeqRef.current;
+          return;
+        }
         // Convert scaling on text into font size to keep a clean model
         canvas.getObjects().forEach(normalizeTextScaling);
 
@@ -165,7 +206,6 @@ export default function PageCanvasFabric(props: Props) {
           try {
             const data = JSON.parse(payload);
             if (data.kind === "text") {
-              const id = newId("t");
               const t: any = await createTextObject({
                 left: pointer.x,
                 top: pointer.y,
@@ -173,7 +213,17 @@ export default function PageCanvasFabric(props: Props) {
                 fontSize: 24,
                 fill: "#000",
               });
-              (t as any).checkfuId = id;
+              // Persist first to get the canonical id
+              const id = onCreateText
+                ? await onCreateText({
+                    pageId,
+                    x: Math.round(pointer.x),
+                    y: Math.round(pointer.y),
+                    width: Math.round(t.width || 120),
+                    height: Math.round(t.height || 24),
+                  })
+                : newId("t");
+              (t as any).checkfuId = id || newId("t");
               (t as any).checkfuType = "text";
               canvas.add(t);
               canvas.setActiveObject(t);
@@ -182,9 +232,17 @@ export default function PageCanvasFabric(props: Props) {
               return;
             } else if (data.kind === "image") {
               // Create placeholder rectangle with an X
-              const id = newId("imgph");
               const g: any = await createImagePlaceholder(pointer.x, pointer.y);
-              g.checkfuId = id;
+              const id = onCreateImage
+                ? await onCreateImage({
+                    pageId,
+                    x: Math.round(pointer.x),
+                    y: Math.round(pointer.y),
+                    width: Math.round(g.width || 160),
+                    height: Math.round(g.height || 120),
+                  })
+                : newId("imgph");
+              g.checkfuId = id || newId("imgph");
               g.checkfuType = "image";
               g.checkfuSrc = undefined;
               canvas.add(g);
@@ -258,7 +316,20 @@ export default function PageCanvasFabric(props: Props) {
     if (!canvas) return;
     void withHydration(async () => {
       canvas.discardActiveObject();
-      await hydrate(canvas, items);
+      // Block re-adding a just-deleted child once per seq
+      const blockId =
+        props.blockChildId &&
+        props.blockChildSeq &&
+        props.blockChildSeq !== lastBlockSeqRef.current
+          ? props.blockChildId
+          : undefined;
+      await hydrate(canvas, items, { blockId });
+      if (
+        props.blockChildSeq &&
+        props.blockChildSeq !== lastBlockSeqRef.current
+      ) {
+        lastBlockSeqRef.current = props.blockChildSeq;
+      }
       canvas.requestRenderAll();
     });
   }, [items, withHydration]);
@@ -284,6 +355,24 @@ export default function PageCanvasFabric(props: Props) {
     });
   }, [selectedChildId, items, withHydration]);
 
+  // one-shot immediate removal — prevents visual ghost after a delete
+  const lastRemoveSeq = useRef(0);
+  useEffect(() => {
+    const canvas = fabricRef.current;
+    if (!canvas) return;
+    const seq = props.removeChildSeq || 0;
+    const id = props.removeChildId || null;
+    if (!id || !seq || seq === lastRemoveSeq.current) return;
+    lastRemoveSeq.current = seq;
+    const obj = canvas.getObjects().find((o: any) => o.checkfuId === id);
+    if (obj) {
+      try {
+        canvas.remove(obj);
+      } catch {}
+      canvas.requestRenderAll();
+    }
+  }, [props.removeChildSeq, props.removeChildId]);
+
   return (
     <canvas
       ref={canvasElRef}
@@ -294,7 +383,11 @@ export default function PageCanvasFabric(props: Props) {
   );
 }
 
-async function hydrate(canvas: any, items: (TextChild | ImageChild)[]) {
+async function hydrate(
+  canvas: any,
+  items: (TextChild | ImageChild)[],
+  opts?: { blockId?: string },
+) {
   // Fabric classes are loaded on demand by constructors where needed.
   const current = new Map<string, any>();
   canvas.getObjects().forEach((o: any) => current.set(o.checkfuId, o));
@@ -317,6 +410,8 @@ async function hydrate(canvas: any, items: (TextChild | ImageChild)[]) {
 
   // ensure order and existence
   for (const c of items) {
+    // If parent asked to block this id once, skip adding it this pass
+    if (opts?.blockId && c.id === opts.blockId) continue;
     let obj = current.get(c.id);
     if (!obj) {
       if (c.type === "text") {

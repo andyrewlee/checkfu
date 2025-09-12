@@ -101,6 +101,13 @@ function PageNode({ data, selected }: NodeProps<PageRFNode>) {
       {/* Page canvas */}
       <div
         className="relative overflow-hidden bg-slate-50 border nodrag nopan nowheel"
+        onMouseDown={(e) => {
+          // Prevent React Flow from treating canvas clicks as node clicks
+          e.stopPropagation();
+        }}
+        onClick={(e) => {
+          e.stopPropagation();
+        }}
         style={{ width: dims.w, height: dims.h }}
       >
         <PageCanvasFabric
@@ -108,17 +115,33 @@ function PageNode({ data, selected }: NodeProps<PageRFNode>) {
           orientation={orientation}
           items={storeMode ? (page?.children ?? []) : (data as any).children}
           selectedChildId={storeMode ? (page?.selectedChildId ?? null) : null}
+          suppressCommitSeq={(data as any).suppressCommitSeq || 0}
+          removeChildId={(data as any).removeChildId || null}
+          removeChildSeq={(data as any).removeChildSeq || 0}
+          blockChildId={(data as any).blockChildId || null}
+          blockChildSeq={(data as any).blockChildSeq || 0}
           onChildrenChange={(pid, next) => {
-            if (storeMode) replaceChildren(pid, next);
-            else (data as any).onChildrenChange?.(pid, next);
+            if (storeMode) {
+              replaceChildren(pid, next);
+              (data as any).onChildrenChange?.(pid, next);
+            } else (data as any).onChildrenChange?.(pid, next);
           }}
           onSelectChild={(pid, childId) => {
             if (storeMode) {
               // Ensure Inspector targets this page when selecting inside Fabric
               setCurrentPage(pid);
               selectChild(pid, childId);
+              (data as any).onChildSelect?.(pid, childId);
             } else (data as any).onSelectChild?.(pid, childId);
           }}
+          onCreateText={async ({ pageId, x, y, width, height }) =>
+            (data as any).onCreateText?.({ pageId, x, y, width, height }) ??
+            null
+          }
+          onCreateImage={async ({ pageId, x, y, width, height }) =>
+            (data as any).onCreateImage?.({ pageId, x, y, width, height }) ??
+            null
+          }
         />
         {(storeMode ? page?.generating : (data as any).loading) ? (
           <div className="absolute inset-0 grid place-items-center bg-white/70 pointer-events-none select-none">
