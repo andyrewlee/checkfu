@@ -81,14 +81,20 @@ function PageNode({ data, selected }: NodeProps<PageRFNode>) {
       <div
         className="flex items-center justify-between mb-2 select-none dragHandlePage"
         onClick={(e) => {
+          const pid = storeMode ? (maybePageId ?? "") : (data as any).id;
           if (e.metaKey || e.ctrlKey) {
             e.preventDefault();
-            (data as any).onQuickGenerate?.(
-              storeMode ? (maybePageId ?? "") : (data as any).id,
-            );
+            (data as any).onQuickGenerate?.(pid);
+            return;
           }
+          // Make this page active in the inspector and clear any child selection
+          setCurrentPage(pid);
+          // Clear selected child so the Page section shows in the inspector
+          try {
+            selectChild(pid, null);
+          } catch {}
         }}
-        title="Cmd/Ctrl+Click to quick-generate"
+        title="Click to select page. Cmd/Ctrl+Click to quick-generate"
       >
         <div
           className="text-xs font-medium truncate"
@@ -101,13 +107,6 @@ function PageNode({ data, selected }: NodeProps<PageRFNode>) {
       {/* Page canvas */}
       <div
         className="relative overflow-hidden bg-slate-50 border nodrag nopan nowheel"
-        onMouseDown={(e) => {
-          // Prevent React Flow from treating canvas clicks as node clicks
-          e.stopPropagation();
-        }}
-        onClick={(e) => {
-          e.stopPropagation();
-        }}
         style={{ width: dims.w, height: dims.h }}
       >
         <PageCanvasFabric
@@ -115,11 +114,6 @@ function PageNode({ data, selected }: NodeProps<PageRFNode>) {
           orientation={orientation}
           items={storeMode ? (page?.children ?? []) : (data as any).children}
           selectedChildId={storeMode ? (page?.selectedChildId ?? null) : null}
-          suppressCommitSeq={(data as any).suppressCommitSeq || 0}
-          removeChildId={(data as any).removeChildId || null}
-          removeChildSeq={(data as any).removeChildSeq || 0}
-          blockChildId={(data as any).blockChildId || null}
-          blockChildSeq={(data as any).blockChildSeq || 0}
           onChildrenChange={(pid, next) => {
             if (storeMode) {
               replaceChildren(pid, next);

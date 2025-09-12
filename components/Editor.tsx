@@ -239,21 +239,7 @@ export default function Editor() {
     target: e.target,
   }));
   const [showSettings, setShowSettings] = useState(false);
-  const [suppressCommitSeqByPage, setSuppressCommitSeqByPage] = useState<
-    Record<string, number>
-  >({});
-  const [removeChildIdByPage, setRemoveChildIdByPage] = useState<
-    Record<string, string | null>
-  >({});
-  const [removeChildSeqByPage, setRemoveChildSeqByPage] = useState<
-    Record<string, number>
-  >({});
-  const [blockChildIdByPage, setBlockChildIdByPage] = useState<
-    Record<string, string | null>
-  >({});
-  const [blockChildSeqByPage, setBlockChildSeqByPage] = useState<
-    Record<string, number>
-  >({});
+  // No canvas suppression/one-shot removal state; keep data flow simple
   // Loaded CCSS Kindergarten standards catalog (code + description)
   const [standardsCatalog, setStandardsCatalog] = useState<
     { code: string; description: string }[]
@@ -341,9 +327,6 @@ export default function Editor() {
   );
   const deletePageMutation = useMutation(
     apiAny.pages?.deletePageDeep ?? apiAny.explore?.deletePageDeep,
-  );
-  const deleteChildNodeMutation = useMutation(
-    apiAny.nodes?.deleteNode ?? apiAny.explore?.deleteNode,
   );
 
   const [projectId, setProjectId] = useState<string | null>(null);
@@ -530,12 +513,7 @@ export default function Editor() {
     [actions],
   );
   const onNodeClickStable = useCallback(
-    (evt: any, n: { id: string }) => {
-      // If the click originated from inside the Fabric canvas, ignore
-      const t = evt?.target as HTMLElement | null;
-      if (t && (t.closest("canvas") || t.closest(".fabric-canvas"))) return;
-      actions.setCurrentPage(n.id);
-    },
+    (_: unknown, n: { id: string }) => actions.setCurrentPage(n.id),
     [actions],
   );
 
@@ -941,11 +919,6 @@ export default function Editor() {
     pagesIdsRef.current = idsSig;
     lastCurrentPageIdRef.current = currentPageId;
     setNodes((old) => {
-      const currentHasChildSelected = !!(
-        currentPageId &&
-        (useEditorStore.getState().pages[currentPageId]?.selectedChildId ??
-          null)
-      );
       const next = pages.map((p, i) => {
         const existing = old.find((n) => n.id === p.id);
         const storePos = nodePositions[p.id];
@@ -962,11 +935,6 @@ export default function Editor() {
           dragHandle: ".dragHandlePage",
           data: {
             pageId: p.id,
-            suppressCommitSeq: suppressCommitSeqByPage[p.id] || 0,
-            removeChildId: removeChildIdByPage[p.id] || null,
-            removeChildSeq: removeChildSeqByPage[p.id] || 0,
-            blockChildId: blockChildIdByPage[p.id] || null,
-            blockChildSeq: blockChildSeqByPage[p.id] || 0,
             onBranch: (id: string) => branchFromRef.current(id),
             onBranchWithPrompt: (id: string, prompt: string) =>
               branchFromWithPromptRef.current(id, prompt),
@@ -975,17 +943,7 @@ export default function Editor() {
               pid: string,
               next: (TextChild | ImageChild)[],
             ) => {
-              // schedule server updates for each child
               next.forEach((c) => scheduleNodeUpdate(c));
-            },
-            onChildSelect: (pid: string, childId: string | null) => {
-              if (childId) {
-                setNodes((ns) =>
-                  (ns as any).map((n: any) =>
-                    n.id === pid ? { ...n, selected: false } : n,
-                  ),
-                );
-              }
             },
             onCreateText: async ({
               pageId,
@@ -1055,9 +1013,7 @@ export default function Editor() {
             },
             onDelete: (id: string) => deleteNodeRef.current(id),
           } as unknown as PageNodeData,
-          selected: currentHasChildSelected
-            ? false
-            : (existing?.selected ?? p.id === currentPageId),
+          selected: existing?.selected ?? p.id === currentPageId,
         } as unknown as PageRFNode;
         return node;
       });
@@ -1080,11 +1036,9 @@ export default function Editor() {
     currentPageId,
     setNodes,
     nodePositions,
-    suppressCommitSeqByPage,
-    removeChildIdByPage,
-    removeChildSeqByPage,
-    blockChildIdByPage,
-    blockChildSeqByPage,
+    addTextNodeMutation,
+    addImageNodeMutation,
+    scheduleNodeUpdate,
   ]);
 
   // Drop & paste handlers and keyboard shortcuts via hooks
@@ -1103,39 +1057,6 @@ export default function Editor() {
       if (currentPageId) void quickGenerate(currentPageId);
     },
     onDeleteSelected: () => {
-      // If a child is selected in the Inspector, delete only that child
-      const childId =
-        useEditorStore.getState().pages[currentPageId!]?.selectedChildId ??
-        null;
-      if (childId && currentPageId) {
-        // Remove from local store
-        setPagePatch(currentPageId, {
-          children: (
-            useEditorStore.getState().pages[currentPageId].children || []
-          ).filter((c) => c.id !== childId),
-          selectedChildId: null,
-        });
-        // Prevent Fabric commit from resurrecting the deleted child once
-        setSuppressCommitSeqByPage((m) => ({
-          ...m,
-          [currentPageId]: (m[currentPageId] || 0) + 1,
-        }));
-        // Prompt the canvas to remove the object immediately
-        setRemoveChildIdByPage((m) => ({ ...m, [currentPageId]: childId }));
-        setRemoveChildSeqByPage((m) => ({
-          ...m,
-          [currentPageId]: (m[currentPageId] || 0) + 1,
-        }));
-        // Block re-add during next hydration
-        setBlockChildIdByPage((m) => ({ ...m, [currentPageId]: childId }));
-        setBlockChildSeqByPage((m) => ({
-          ...m,
-          [currentPageId]: (m[currentPageId] || 0) + 1,
-        }));
-        // Best-effort server delete
-        void deleteChildNodeMutation({ nodeId: childId });
-        return;
-      }
       const selected = nodes.filter((n) => n.selected).map((n) => n.id);
       if (selected.length > 1) deleteNodes(selected);
       else if (currentPageId) deleteNode(currentPageId);
@@ -2058,30 +1979,7 @@ export default function Editor() {
                                     ).filter((c) => c.id !== cid),
                                     selectedChildId: null,
                                   });
-                                  setSuppressCommitSeqByPage((m) => ({
-                                    ...m,
-                                    [currentPageId!]:
-                                      (m[currentPageId!] || 0) + 1,
-                                  }));
-                                  setRemoveChildIdByPage((m) => ({
-                                    ...m,
-                                    [currentPageId!]: cid,
-                                  }));
-                                  setRemoveChildSeqByPage((m) => ({
-                                    ...m,
-                                    [currentPageId!]:
-                                      (m[currentPageId!] || 0) + 1,
-                                  }));
-                                  setBlockChildIdByPage((m) => ({
-                                    ...m,
-                                    [currentPageId!]: cid,
-                                  }));
-                                  setBlockChildSeqByPage((m) => ({
-                                    ...m,
-                                    [currentPageId!]:
-                                      (m[currentPageId!] || 0) + 1,
-                                  }));
-                                  void deleteChildNodeMutation({ nodeId: cid });
+                                  // Persisting child deletes to server is disabled in this simplified flow
                                 }}
                               >
                                 Delete Text
@@ -2225,30 +2123,7 @@ export default function Editor() {
                                     ).filter((c) => c.id !== cid),
                                     selectedChildId: null,
                                   });
-                                  setSuppressCommitSeqByPage((m) => ({
-                                    ...m,
-                                    [currentPageId!]:
-                                      (m[currentPageId!] || 0) + 1,
-                                  }));
-                                  setRemoveChildIdByPage((m) => ({
-                                    ...m,
-                                    [currentPageId!]: cid,
-                                  }));
-                                  setRemoveChildSeqByPage((m) => ({
-                                    ...m,
-                                    [currentPageId!]:
-                                      (m[currentPageId!] || 0) + 1,
-                                  }));
-                                  setBlockChildIdByPage((m) => ({
-                                    ...m,
-                                    [currentPageId!]: cid,
-                                  }));
-                                  setBlockChildSeqByPage((m) => ({
-                                    ...m,
-                                    [currentPageId!]:
-                                      (m[currentPageId!] || 0) + 1,
-                                  }));
-                                  void deleteChildNodeMutation({ nodeId: cid });
+                                  // Persisting child deletes to server is disabled in this simplified flow
                                 }}
                               >
                                 Delete Image
