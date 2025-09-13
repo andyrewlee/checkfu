@@ -5,7 +5,7 @@
 - `app/` – Next.js App Router (`page.tsx`, `layout.tsx`, print CSS in `globals.css`). Protected server pages live under `app/server` (see `middleware.ts`).
 - `components/` – React UI (PascalCase `.tsx`).
 - `store/` – Zustand state (`useEditorStore.ts`).
-- `lib/` – Utilities (`nanoBanana.ts` for Gemini client helpers).
+- `lib/` – Utilities (image helpers, Fabric, ids, pdf). Client Gemini helpers were removed; all AI runs server‑side via Convex actions.
 - `convex/` – Convex backend (`schema.ts`, `auth.config.ts`, generated types in `_generated/` – do not edit).
 - `public/` – Static assets (favicons, `ccss_kindergarten_math_standards.json`).
 - `types/` – Type shims.
@@ -45,6 +45,11 @@
 
 ## Security & Configuration Tips
 
-- Do not commit API keys. Gemini key is client-side only and stored in `localStorage` (`CHECKFU_GEMINI_API_KEY`).
+- Do not commit API keys. Configure the Gemini API key server-side only as a Convex environment variable `GOOGLE_GENERATIVE_AI_API_KEY`. Never store keys in the client or `localStorage`.
 - Clerk: set `CLERK_JWT_ISSUER_DOMAIN` if enabling Convex auth (see `convex/auth.config.ts`).
 - Avoid editing `convex/_generated/*` files.
+
+## Convex Development
+
+- Before editing `convex/*.ts` (schema, queries, mutations, actions), follow the guidelines in `.cursor/rules/convex_rules.mdc`.
+- Use the new Convex function syntax with explicit `args` and `returns` validators, and prefer index-backed reads via `withIndex`.

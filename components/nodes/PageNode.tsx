@@ -81,14 +81,20 @@ function PageNode({ data, selected }: NodeProps<PageRFNode>) {
       <div
         className="flex items-center justify-between mb-2 select-none dragHandlePage"
         onClick={(e) => {
+          const pid = storeMode ? (maybePageId ?? "") : (data as any).id;
           if (e.metaKey || e.ctrlKey) {
             e.preventDefault();
-            (data as any).onQuickGenerate?.(
-              storeMode ? (maybePageId ?? "") : (data as any).id,
-            );
+            (data as any).onQuickGenerate?.(pid);
+            return;
           }
+          // Make this page active in the inspector and clear any child selection
+          setCurrentPage(pid);
+          // Clear selected child so the Page section shows in the inspector
+          try {
+            selectChild(pid, null);
+          } catch {}
         }}
-        title="Cmd/Ctrl+Click to quick-generate"
+        title="Click to select page. Cmd/Ctrl+Click to quick-generate"
       >
         <div
           className="text-xs font-medium truncate"
@@ -109,16 +115,27 @@ function PageNode({ data, selected }: NodeProps<PageRFNode>) {
           items={storeMode ? (page?.children ?? []) : (data as any).children}
           selectedChildId={storeMode ? (page?.selectedChildId ?? null) : null}
           onChildrenChange={(pid, next) => {
-            if (storeMode) replaceChildren(pid, next);
-            else (data as any).onChildrenChange?.(pid, next);
+            if (storeMode) {
+              replaceChildren(pid, next);
+              (data as any).onChildrenChange?.(pid, next);
+            } else (data as any).onChildrenChange?.(pid, next);
           }}
           onSelectChild={(pid, childId) => {
             if (storeMode) {
               // Ensure Inspector targets this page when selecting inside Fabric
               setCurrentPage(pid);
               selectChild(pid, childId);
+              (data as any).onChildSelect?.(pid, childId);
             } else (data as any).onSelectChild?.(pid, childId);
           }}
+          onCreateText={async ({ pageId, x, y, width, height }) =>
+            (data as any).onCreateText?.({ pageId, x, y, width, height }) ??
+            null
+          }
+          onCreateImage={async ({ pageId, x, y, width, height }) =>
+            (data as any).onCreateImage?.({ pageId, x, y, width, height }) ??
+            null
+          }
         />
         {(storeMode ? page?.generating : (data as any).loading) ? (
           <div className="absolute inset-0 grid place-items-center bg-white/70 pointer-events-none select-none">

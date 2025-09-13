@@ -1,5 +1,6 @@
-import Editor from "@/components/Editor";
+import ClientHome from "@/app/ClientHome";
 
 export default function Page() {
-  return <Editor />;
+  // Render client-side so the UI swaps immediately on sign-in/sign-out
+  return <ClientHome />;
 }

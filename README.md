@@ -11,12 +11,15 @@ Checkfu generates printable black-and-white Kindergarten worksheets and coloring
 - Prereqs: Node 18+, npm
 - Install: `npm install`
 - Run: `npm run dev` and open `http://localhost:3000/editor`
-- Set API key: open Settings (top right) and paste your Gemini key (`CHECKFU_GEMINI_API_KEY` stored in localStorage). Keys are client-side and for prototyping only.
+- Configure AI (server-only): set your Gemini API key in Convex env vars so actions can call `@google/genai`.
+  - Local/dev: `npx convex env set GOOGLE_GENERATIVE_AI_API_KEY <your-key>`
+  - Prod: Convex Dashboard → Settings → Environment Variables → add `GOOGLE_GENERATIVE_AI_API_KEY`
+  - Never paste keys into the client; all generation runs on the server in Convex actions.
 
 ## Use The Editor
 
 - Create: Click `New` or drop/paste an image (file, URL, or clipboard) into the graph area to create a node.
 - Refine/Branch: Click on a node to branch out using a specified prompt.
-- Presets: Choose Worksheet or Coloring Book, then pick a preset. Kindergarten standards (K.*) can be selected to guide prompts.
+- Presets: Choose Worksheet or Coloring Book, then pick a preset. Kindergarten standards (K.\*) can be selected to guide prompts.
 - Standards → Prompt: Selecting standards appends a `<common-core>` XML block to the end of the prompt for clear separation from your text.
 - Export: Use `Export Current`, `Export Selected`, or `Export All` to create a letter-size PDF. Print CSS supports direct browser printing.

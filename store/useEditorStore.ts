@@ -75,6 +75,7 @@ export type ImageChild = ChildBase & {
   type: "image";
   src?: string;
   placeholder?: boolean;
+  fileId?: string;
   crop?: { left: number; top: number; width: number; height: number } | null;
 };
 
@@ -127,11 +128,13 @@ type EditorActions = {
   // Graph actions
   addEdge: (source: string, target: string) => string;
   removeEdgesByIds: (ids: string[]) => void;
+  setEdges: (edges: GraphEdge[]) => void;
   branch: (parentId: string, prompt: string) => string; // atomic: add page + edge
   deletePageWithReattach: (
     id: string,
     preferredParentId?: string | null,
   ) => void;
+  resetAll: () => void;
 };
 
 type Store = EditorState & { actions: EditorActions };
@@ -263,6 +266,7 @@ export const useEditorStore = create<Store>()(
         },
         removeEdgesByIds: (ids) =>
           set((s) => ({ edges: s.edges.filter((e) => !ids.includes(e.id)) })),
+        setEdges: (edges) => set(() => ({ edges })),
 
         branch: (parentId, prompt) => {
           const parent = get().pages[parentId];
@@ -322,6 +326,15 @@ export const useEditorStore = create<Store>()(
                 : s.currentPageId;
             return { pages: rest, order, currentPageId, edges };
           }),
+
+        resetAll: () =>
+          set(() => ({
+            pages: {},
+            order: [],
+            currentPageId: null,
+            nodePositions: {},
+            edges: [],
+          })),
       },
     }),
     {
@@ -373,7 +386,19 @@ export const useActions = () => useEditorStore((s) => s.actions);
 export const usePageById = (id: string | null | undefined) =>
   useEditorStore((s) => (id ? (s.pages[id] ?? null) : null));
 export const usePages = () =>
-  useEditorStore((s) => s.order.map((id) => s.pages[id]).filter(Boolean));
+  useEditorStore((s) => {
+    const seen = new Set<string>();
+    const out: Page[] = [] as any;
+    for (const id of s.order) {
+      if (seen.has(id)) continue;
+      const p = s.pages[id];
+      if (p) {
+        out.push(p);
+        seen.add(id);
+      }
+    }
+    return out;
+  });
 export const useCurrentPageId = () => useEditorStore((s) => s.currentPageId);
 export const useCurrentPage = () =>
   useEditorStore((s) => (s.currentPageId ? s.pages[s.currentPageId] : null));

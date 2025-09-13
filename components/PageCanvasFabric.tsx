@@ -25,6 +25,21 @@ type Props = {
   selectedChildId: string | null;
   onChildrenChange: (pageId: string, next: (TextChild | ImageChild)[]) => void;
   onSelectChild: (pageId: string, childId: string | null) => void;
+  onCreateText?: (args: {
+    pageId: string;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  }) => Promise<string | null>;
+  onCreateImage?: (args: {
+    pageId: string;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  }) => Promise<string | null>;
+  // (no special suppression or removal tokens)
 };
 
 export default function PageCanvasFabric(props: Props) {
@@ -36,6 +51,8 @@ export default function PageCanvasFabric(props: Props) {
     onChildrenChange,
     onSelectChild,
   } = props;
+  const onCreateText = props.onCreateText;
+  const onCreateImage = props.onCreateImage;
   const canvasElRef = useRef<HTMLCanvasElement | null>(null);
   const fabricRef = useRef<any | null>(null);
   const textChangeTimerRef = useRef<number | null>(null);
@@ -165,7 +182,6 @@ export default function PageCanvasFabric(props: Props) {
           try {
             const data = JSON.parse(payload);
             if (data.kind === "text") {
-              const id = newId("t");
               const t: any = await createTextObject({
                 left: pointer.x,
                 top: pointer.y,
@@ -173,7 +189,17 @@ export default function PageCanvasFabric(props: Props) {
                 fontSize: 24,
                 fill: "#000",
               });
-              (t as any).checkfuId = id;
+              // Persist first to get the canonical id
+              const id = onCreateText
+                ? await onCreateText({
+                    pageId,
+                    x: Math.round(pointer.x),
+                    y: Math.round(pointer.y),
+                    width: Math.round(t.width || 120),
+                    height: Math.round(t.height || 24),
+                  })
+                : newId("t");
+              (t as any).checkfuId = id || newId("t");
               (t as any).checkfuType = "text";
               canvas.add(t);
               canvas.setActiveObject(t);
@@ -182,9 +208,17 @@ export default function PageCanvasFabric(props: Props) {
               return;
             } else if (data.kind === "image") {
               // Create placeholder rectangle with an X
-              const id = newId("imgph");
               const g: any = await createImagePlaceholder(pointer.x, pointer.y);
-              g.checkfuId = id;
+              const id = onCreateImage
+                ? await onCreateImage({
+                    pageId,
+                    x: Math.round(pointer.x),
+                    y: Math.round(pointer.y),
+                    width: Math.round(g.width || 160),
+                    height: Math.round(g.height || 120),
+                  })
+                : newId("imgph");
+              g.checkfuId = id || newId("imgph");
               g.checkfuType = "image";
               g.checkfuSrc = undefined;
               canvas.add(g);
@@ -283,6 +317,8 @@ export default function PageCanvasFabric(props: Props) {
       canvas.requestRenderAll();
     });
   }, [selectedChildId, items, withHydration]);
+
+  // no immediate removal effect
 
   return (
     <canvas
