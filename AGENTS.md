@@ -45,6 +45,11 @@
 
 ## Security & Configuration Tips
 
-- Do not commit API keys. Gemini key is client-side only and stored in `localStorage` (`CHECKFU_GEMINI_API_KEY`).
+- Do not commit API keys. Configure the Gemini API key server-side only as a Convex environment variable `GOOGLE_GENERATIVE_AI_API_KEY`. Never store keys in the client or `localStorage`.
 - Clerk: set `CLERK_JWT_ISSUER_DOMAIN` if enabling Convex auth (see `convex/auth.config.ts`).
 - Avoid editing `convex/_generated/*` files.
+
+## Convex Development
+
+- Before editing `convex/*.ts` (schema, queries, mutations, actions), follow the guidelines in `.cursor/rules/convex_rules.mdc`.
+- Use the new Convex function syntax with explicit `args` and `returns` validators, and prefer index-backed reads via `withIndex`.

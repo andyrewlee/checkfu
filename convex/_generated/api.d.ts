@@ -16,7 +16,6 @@ import type {
 import type * as ai from "../ai.js";
 import type * as explore from "../explore.js";
 import type * as files from "../files.js";
-import type * as myFunctions from "../myFunctions.js";
 import type * as nodes from "../nodes.js";
 import type * as pages from "../pages.js";
 import type * as projects from "../projects.js";
@@ -34,7 +33,6 @@ declare const fullApi: ApiFromModules<{
   ai: typeof ai;
   explore: typeof explore;
   files: typeof files;
-  myFunctions: typeof myFunctions;
   nodes: typeof nodes;
   pages: typeof pages;
   projects: typeof projects;
