@@ -754,7 +754,7 @@ export default function Editor() {
         aria-label="Editor top bar"
       >
         <div className="flex items-center gap-3">
-          <span className="font-semibold">Checkfu</span>
+          <img src="/logo.svg" alt="Checkfu Logo" className="h-6" />
         </div>
         <div className="flex items-center gap-2">
           {/* Undo/Redo moved to the right side; icon-only, consistent height */}
