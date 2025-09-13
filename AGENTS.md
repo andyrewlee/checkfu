@@ -5,7 +5,7 @@
 - `app/` – Next.js App Router (`page.tsx`, `layout.tsx`, print CSS in `globals.css`). Protected server pages live under `app/server` (see `middleware.ts`).
 - `components/` – React UI (PascalCase `.tsx`).
 - `store/` – Zustand state (`useEditorStore.ts`).
-- `lib/` – Utilities (`nanoBanana.ts` for Gemini client helpers).
+- `lib/` – Utilities (image helpers, Fabric, ids, pdf). Client Gemini helpers were removed; all AI runs server‑side via Convex actions.
 - `convex/` – Convex backend (`schema.ts`, `auth.config.ts`, generated types in `_generated/` – do not edit).
 - `public/` – Static assets (favicons, `ccss_kindergarten_math_standards.json`).
 - `types/` – Type shims.

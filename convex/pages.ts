@@ -82,6 +82,19 @@ export const deletePageDeep = mutation({
   },
 });
 
+export const setRenderFile = mutation({
+  args: { pageId: v.id("pages"), fileId: v.id("files") },
+  handler: async (ctx, { pageId, fileId }) => {
+    const page = await ctx.db.get(pageId);
+    if (!page) return false;
+    await ctx.db.patch(pageId, {
+      renderFileId: fileId,
+      updatedAt: Date.now(),
+    } as any);
+    return true;
+  },
+});
+
 export const branchPage = mutation({
   args: {
     parentPageId: v.id("pages"),

@@ -75,6 +75,7 @@ export type ImageChild = ChildBase & {
   type: "image";
   src?: string;
   placeholder?: boolean;
+  fileId?: string;
   crop?: { left: number; top: number; width: number; height: number } | null;
 };
 

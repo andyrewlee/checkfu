@@ -19,7 +19,8 @@
  * - Dragging records a single nodePositions snapshot when the drag ends.
  */
 
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
+import Image from "next/image";
 import {
   useAuth,
   useClerk,
@@ -29,11 +30,7 @@ import {
   SignInButton,
 } from "@clerk/nextjs";
 import { useSubscription } from "@clerk/nextjs/experimental";
-import {
-  generateColoringBookImage,
-  transformImageWithPrompt,
-  generateTextContent,
-} from "@/lib/nanoBanana";
+// Text generation now uses server-side AI SDK via Convex action
 import {
   ReactFlow,
   Background,
@@ -52,7 +49,7 @@ import { jsPDF } from "jspdf";
 import PageNode, { type PageNodeData } from "@/components/nodes/PageNode";
 import { newId } from "@/lib/ids";
 import { revokeIfBlob } from "@/lib/url";
-import { useMutation, useQuery } from "convex/react";
+import { useMutation, useQuery, useAction } from "convex/react";
 import { api as generatedApi } from "@/convex/_generated/api";
 // Layers panel removed from Inspector to focus on a single selection
 import {
@@ -76,7 +73,6 @@ import type {
   Orientation,
 } from "@/store/useEditorStore";
 import {
-  blobUrlToPngBase64,
   fitImageToPrintableArea,
   fitImageToRect,
   thresholdToDataUrl,
@@ -165,29 +161,7 @@ function useAutoScrollIntoView(id: string | null) {
   }, [id]);
 }
 
-function useGeminiApiKeyNeeded() {
-  const [needsApiKey, setNeedsApiKey] = useState(true);
-  useEffect(() => {
-    const compute = () => {
-      try {
-        if (typeof window === "undefined") return true;
-        const v = window.localStorage.getItem("CHECKFU_GEMINI_API_KEY");
-        return !v;
-      } catch {
-        return true;
-      }
-    };
-    setNeedsApiKey(compute());
-    const onStorage = (e: StorageEvent) => {
-      if (!e.key || e.key === "CHECKFU_GEMINI_API_KEY") {
-        setNeedsApiKey(compute());
-      }
-    };
-    window.addEventListener("storage", onStorage);
-    return () => window.removeEventListener("storage", onStorage);
-  }, []);
-  return needsApiKey;
-}
+// BYO API key (client) removed — all generation runs server-side via Convex actions.
 
 export default function Editor() {
   // Client gating: require sign-in + active subscription (server still enforces)
@@ -202,29 +176,25 @@ export default function Editor() {
   const status = (subscription as any)?.status as string | undefined;
   const hasActivePlan = status === "active" || status === "trialing";
 
-  const ensurePaid = useCallback(
-    async (purpose: "generate" | "branch" | "export") => {
-      console.log("purpose", purpose);
-      if (!isSignedIn) {
-        openSignIn?.({});
-        return false;
-      }
-      if (subLoading) return false;
-      if (subError || !hasActivePlan) {
-        openUserProfile?.();
-        return false;
-      }
-      return true;
-    },
-    [
-      isSignedIn,
-      subLoading,
-      subError,
-      hasActivePlan,
-      openSignIn,
-      openUserProfile,
-    ],
-  );
+  const ensurePaid = useCallback(async () => {
+    if (!isSignedIn) {
+      openSignIn?.({});
+      return false;
+    }
+    if (subLoading) return false;
+    if (subError || !hasActivePlan) {
+      openUserProfile?.();
+      return false;
+    }
+    return true;
+  }, [
+    isSignedIn,
+    subLoading,
+    subError,
+    hasActivePlan,
+    openSignIn,
+    openUserProfile,
+  ]);
   const pages = usePages();
   const currentPageId = useCurrentPageId();
   const currentPage = useCurrentPage();
@@ -238,7 +208,7 @@ export default function Editor() {
     source: e.source,
     target: e.target,
   }));
-  const [showSettings, setShowSettings] = useState(false);
+  // Settings modal removed (API key no longer needed client-side)
   // No canvas suppression/one-shot removal state; keep data flow simple
   // Loaded CCSS Kindergarten standards catalog (code + description)
   const [standardsCatalog, setStandardsCatalog] = useState<
@@ -281,7 +251,7 @@ export default function Editor() {
   const [nodePresets, setNodePresets] = useState<Record<string, string>>({});
   const lastQuickGenAtRef = useRef<number>(0);
   const generatingAny = pages.some((p) => p.generating);
-  const needsApiKey = useGeminiApiKeyNeeded();
+  // All AI calls are server-side; no client API key needed.
   // Top-bar UI feedback states
   const [undoFlash, setUndoFlash] = useState(false);
   const [redoFlash, setRedoFlash] = useState(false);
@@ -335,6 +305,10 @@ export default function Editor() {
   const branchPageMutation = useMutation(
     apiAny.pages?.branchPage ?? apiAny.explore?.branchPage,
   );
+  // Server-side AI actions (Convex). All generation routes through these.
+  const aiGenerateImage = useAction(apiAny.ai?.generateImage);
+  const aiGenerateText = useAction(apiAny.ai?.generateTextLabel);
+  const setPageRenderFile = useMutation(apiAny.pages?.setRenderFile);
 
   const [projectId, setProjectId] = useState<string | null>(null);
   const isLocalPageId = (id: string) =>
@@ -345,6 +319,23 @@ export default function Editor() {
   const projectFull = useQuery(
     apiAny.projects?.getProjectFull ?? apiAny.explore?.getProjectFull,
     projectId ? { projectId } : "skip",
+  ) as any;
+
+  // Collect fileIds in this project to fetch display URLs (once)
+  const projectFileIds = useMemo(() => {
+    if (!projectFull) return [] as string[];
+    const set = new Set<string>();
+    for (const p of projectFull.pages || []) {
+      if (p.renderFileId) set.add(p.renderFileId as string);
+      const nodes: any[] = projectFull.nodesByPage?.[p._id] || [];
+      for (const n of nodes)
+        if (n.kind === "image" && n.fileId) set.add(n.fileId as string);
+    }
+    return Array.from(set);
+  }, [projectFull]);
+  const fileUrls = useQuery(
+    apiAny.files?.getFileUrls ?? apiAny.explore?.getFileUrls,
+    projectFileIds.length ? { fileIds: projectFileIds } : "skip",
   ) as any;
 
   // On mount for signed-in users: get or create their project
@@ -382,6 +373,10 @@ export default function Editor() {
         id: pageIdStr,
         title: pageTitle,
         orientation: pageOrientation,
+        imageUrl:
+          (p.renderFileId &&
+            (fileUrls as any)?.urls?.[p.renderFileId as string]) ||
+          undefined,
       });
       // Capture persisted graph position
       if (typeof p.x === "number" && typeof p.y === "number") {
@@ -409,6 +404,8 @@ export default function Editor() {
             align: (n.style?.align as any) || "left",
           } as TextChild;
         } else {
+          const fid = (n as any).fileId as string | undefined;
+          const url = fid ? fileUrls?.urls?.[fid] : undefined;
           return {
             id: n._id as string,
             type: "image",
@@ -420,8 +417,9 @@ export default function Editor() {
             visible: true,
             locked: false,
             z: n.z || 0,
-            src: undefined,
-            placeholder: !!n.placeholder,
+            src: url,
+            placeholder: !url,
+            fileId: fid,
             crop: null,
           } as ImageChild;
         }
@@ -439,7 +437,51 @@ export default function Editor() {
     }));
     if ((actions as any).setEdges) (actions as any).setEdges(edgeList);
     hydratedRef.current = true;
-  }, [projectFull, actions]);
+  }, [projectFull, fileUrls, actions]);
+
+  // When file URLs arrive after initial hydration, patch image children that
+  // have a fileId but are still placeholders (or missing src) with the URL.
+  useEffect(() => {
+    const map = (fileUrls as any)?.urls as Record<string, string> | undefined;
+    if (!map) return;
+    const state = useEditorStore.getState();
+    const ids = state.order;
+    ids.forEach((pid) => {
+      const page = state.pages[pid];
+      if (!page) return;
+      // Patch page background if render file URL is available and src missing
+      const pageFull = (projectFull as any)?.pages?.find(
+        (pp: any) => String(pp._id) === pid,
+      );
+      const pageRenderId = pageFull?.renderFileId as string | undefined;
+      if (pageRenderId) {
+        const url = map[pageRenderId];
+        if (url && (!page.imageUrl || page.imageUrl.startsWith("blob:"))) {
+          (actions as any).patchPage?.(pid, {
+            imageUrl: url,
+            originalImageUrl: url,
+          });
+        }
+      }
+      let changed = false;
+      const next = (page.children || []).map((c) => {
+        if (c.type === "image" && (c as any).fileId) {
+          const fid = (c as any).fileId as string;
+          const url = map[fid];
+          if (url && ((c as any).placeholder || !(c as any).src)) {
+            changed = true;
+            return {
+              ...(c as any),
+              src: url,
+              placeholder: false,
+            } as ImageChild;
+          }
+        }
+        return c;
+      });
+      if (changed) (actions as any).replaceChildren?.(pid, next);
+    });
+  }, [fileUrls, actions, projectFull]);
 
   // Debounced server updates for node changes
   const nodeUpdateTimersRef = useRef<Record<string, number>>({});
@@ -642,7 +684,7 @@ export default function Editor() {
 
   const branchFrom = useCallback(
     async (parentId: string) => {
-      const ok = await ensurePaid("branch");
+      const ok = await ensurePaid();
       if (!ok) return;
       const parent = useEditorStore.getState().pages[parentId];
       if (!parent) return;
@@ -659,7 +701,7 @@ export default function Editor() {
 
   const quickGenerate = useCallback(
     async (pageId: string) => {
-      const allowed = await ensurePaid("generate");
+      const allowed = await ensurePaid();
       if (!allowed) return;
       const page = useEditorStore.getState().pages[pageId];
       if (!page) return;
@@ -698,9 +740,15 @@ export default function Editor() {
   // Main page generation pipeline.
   // We protect against stale async writes (after undo/redo) by checking a
   // per-page op token before every state write. See beginPageOp/isPageOpCurrent.
+  /**
+   * Server-driven page generation pipeline (image + text).
+   * - Calls Convex actions for text (ai.generateTextLabel) and images (ai.generateImage).
+   * - Updates children progressively in memory, then commits once for a clean undo step.
+   * - Persists text via nodes.updateTextNode and image fileId via nodes.updateImageNode when signed in.
+   */
   const generateInto = useCallback(
     async (pageId: string, prompt: string, pageOverride?: Page) => {
-      const allowed = await ensurePaid("generate");
+      const allowed = await ensurePaid();
       if (!allowed) return;
       try {
         const page = pageOverride ?? useEditorStore.getState().pages[pageId]!;
@@ -727,9 +775,9 @@ export default function Editor() {
               `Current text: "${tc.text || ""}"`,
             ].join("\n");
             try {
-              const out = await generateTextContent(textPrompt);
+              const out = (await aiGenerateText({ prompt: textPrompt })) as any;
               if (!isPageOpCurrent(pageId, op)) return;
-              const label = cleanSingleLineLabel(out);
+              const label = cleanSingleLineLabel(String(out?.text || ""));
               nextChildren[i] = { ...(tc as TextChild), text: label };
               // Persist text update when signed in
               if (isSignedIn && !isLocalNodeId(tc.id)) {
@@ -754,13 +802,12 @@ export default function Editor() {
           if (c.type === "image") {
             const ic = c as ImageChild;
             try {
-              let url: string;
-              if (ic.src) {
-                const baseB64 = await blobUrlToPngBase64(ic.src);
-                url = await transformImageWithPrompt(baseB64, instructionImage);
-              } else {
-                url = await generateColoringBookImage(instructionImage);
-              }
+              if (!projectId) throw new Error("No projectId");
+              const out = await aiGenerateImage({
+                projectId,
+                prompt: instructionImage,
+              });
+              const url = out?.url as string;
               if (!isPageOpCurrent(pageId, op)) return;
               const fitted = await fitImageToRect(url, c.width, c.height);
               nextChildren[i] = {
@@ -768,6 +815,19 @@ export default function Editor() {
                 src: fitted,
                 placeholder: false,
               };
+              // Persist file link to node if signed in
+              if (isSignedIn && !isLocalNodeId(ic.id) && out?.fileId) {
+                try {
+                  await updateImageNodeMutation({
+                    nodeId: ic.id,
+                    fileId: out.fileId as any,
+                  });
+                  nextChildren[i] = {
+                    ...(nextChildren[i] as ImageChild),
+                    fileId: out.fileId as any,
+                  };
+                } catch {}
+              }
             } catch {
               /* ignore individual failure */
             }
@@ -776,17 +836,22 @@ export default function Editor() {
 
         // 3) background
         let nextImageUrl: string | undefined = page.imageUrl;
-        const baseUrl = page.originalImageUrl || page.imageUrl;
         try {
-          let rawUrl: string;
-          if (baseUrl) {
-            const baseB64 = await blobUrlToPngBase64(baseUrl);
-            rawUrl = await transformImageWithPrompt(baseB64, instructionImage);
-          } else {
-            rawUrl = await generateColoringBookImage(instructionImage);
-          }
+          if (!projectId) throw new Error("No projectId");
+          const out = (await aiGenerateImage({
+            projectId,
+            prompt: instructionImage,
+          })) as any;
+          const rawUrl = out?.url as string;
           if (!isPageOpCurrent(pageId, op)) return;
           nextImageUrl = await fitImageToPrintableArea(rawUrl, page);
+          if (isSignedIn && out?.fileId)
+            try {
+              await setPageRenderFile({
+                pageId: pageId as any,
+                fileId: out.fileId as any,
+              });
+            } catch {}
         } catch {
           /* ignore background failure */
         }
@@ -826,13 +891,22 @@ export default function Editor() {
       ensurePaid,
       updateTextNodeMutation,
       isSignedIn,
+      aiGenerateImage,
+      aiGenerateText,
+      projectId,
+      updateImageNodeMutation,
+      setPageRenderFile,
     ],
   );
 
-  // Define branching after generateInto so dependencies are valid
+  /**
+   * Branching: create a child page on the server (Convex), then generate into it.
+   * - Server returns the new page id and cloned nodes; we select the child locally.
+   * - We then call generateInto(childId, prompt) to fill placeholders and/or background via server actions.
+   */
   const branchFromWithPrompt = useCallback(
     async (parentId: string, prompt: string) => {
-      const allowed = await ensurePaid("branch");
+      const allowed = await ensurePaid();
       if (!allowed) return;
       try {
         const res = (await branchPageMutation({
@@ -916,6 +990,11 @@ export default function Editor() {
     branchFromWithPromptRef.current = branchFromWithPrompt;
   }, [branchFromWithPrompt]);
 
+  /**
+   * Derivative generation for a child page using the parent as context.
+   * - Fills image placeholders via ai.generateImage; updates background if needed.
+   * - Uses op tokens so stale async writes are ignored after undo/redo.
+   */
   const generateChildFromParent = useCallback(
     async (childId: string, parent: Page, prompt: string) => {
       const op = beginPageOp(childId);
@@ -938,7 +1017,12 @@ export default function Editor() {
         for (let i = 0; i < childrenNext.length; i++) {
           const c = childrenNext[i];
           if (c.type === "image" && !(c as ImageChild).src) {
-            const url = await generateColoringBookImage(instruction);
+            if (!projectId) throw new Error("No projectId");
+            const out = await aiGenerateImage({
+              projectId: projectId!,
+              prompt: instruction,
+            });
+            const url = out?.url as string;
             if (!isPageOpCurrent(childId, op)) return;
             childrenNext = childrenNext.map((cc, j) =>
               j === i
@@ -966,25 +1050,35 @@ export default function Editor() {
       );
       if (baseUrl) {
         try {
-          const baseB64 = await blobUrlToPngBase64(baseUrl);
+          if (!projectId) throw new Error("No projectId");
           const instruction = buildInstruction(childDraft, prompt, "image");
-          const rawUrl = await transformImageWithPrompt(baseB64, instruction);
-          const fitted = await fitImageToPrintableArea(rawUrl, childDraft);
+          const out = (await aiGenerateImage({
+            projectId,
+            prompt: instruction,
+          })) as any;
+          const fitted = await fitImageToPrintableArea(
+            out?.url as string,
+            childDraft,
+          );
           const prev = useEditorStore.getState().pages[childId];
           revokeIfBlob(prev?.originalImageUrl);
           revokeIfBlob(prev?.imageUrl);
           if (!isPageOpCurrent(childId, op)) return;
-          setPagePatch(childId, {
-            imageUrl: fitted,
-            originalImageUrl: fitted,
-          });
+          setPagePatch(childId, { imageUrl: fitted, originalImageUrl: fitted });
+          // Persist background render file for robust hydration
+          if (isSignedIn && out?.fileId)
+            try {
+              await setPageRenderFile({
+                pageId: childId as any,
+                fileId: out.fileId as any,
+              });
+            } catch {}
           writeUI(() =>
             setPagePatch(childId, { generating: false, status: "" }),
           );
           return;
         } catch (e) {
-          console.warn("Transform failed; falling back to generate", e);
-          pushToast("Transform failed. Falling back to generate.", "error");
+          console.warn("Generate failed", e);
         }
       }
       await generateInto(childId, prompt, childDraft);
@@ -995,6 +1089,10 @@ export default function Editor() {
       setPagePatch,
       beginPageOp,
       isPageOpCurrent,
+      aiGenerateImage,
+      projectId,
+      isSignedIn,
+      setPageRenderFile,
     ],
   );
   useEffect(() => {
@@ -1221,7 +1319,13 @@ export default function Editor() {
         aria-label="Editor top bar"
       >
         <div className="flex items-center gap-3">
-          <img src="/logo.svg" alt="Checkfu Logo" className="h-6" />
+          <Image
+            src="/logo.svg"
+            alt="Checkfu Logo"
+            width={96}
+            height={24}
+            className="h-6 w-auto"
+          />
         </div>
         <div className="flex items-center gap-2">
           {/* Undo/Redo moved to the right side; icon-only, consistent height */}
@@ -1306,7 +1410,7 @@ export default function Editor() {
             aria-busy={exporting}
             disabled={!pages.length || exporting}
             onClick={async () => {
-              if (!(await ensurePaid("export"))) return;
+              if (!(await ensurePaid())) return;
               const selected = nodes
                 .filter((n) => n.selected)
                 .map((n) => useEditorStore.getState().pages[n.id])
@@ -1359,32 +1463,7 @@ export default function Editor() {
               </span>
             ) : null}
           </button>
-          <button
-            className={`inline-flex h-9 items-center gap-2 px-3 rounded-md border text-sm transition hover:bg-slate-50 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${needsApiKey ? "border-amber-400 bg-amber-50 text-amber-800" : ""}`}
-            aria-label="Settings"
-            title={
-              needsApiKey
-                ? "Add your Gemini API key to generate images"
-                : "API Key"
-            }
-            onClick={() => setShowSettings(true)}
-          >
-            <svg
-              width="16"
-              height="16"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              aria-hidden
-            >
-              <circle cx="12" cy="12" r="3"></circle>
-              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06A2 2 0 1 1 7.04 2.4l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06-.06a1.65 1.65 0 0 0-.33 1.82V9c0 .63.37 1.2.95 1.45.33.14.68.27 1.05.37" />
-            </svg>
-            {needsApiKey ? "Add API Key" : "API Key"}
-          </button>
+          {/* API Key settings removed — generation runs on the server. */}
           <div className="ml-2 pl-2 border-l flex items-center">
             <SignedOut>
               <SignInButton mode="modal">
@@ -2046,7 +2125,7 @@ export default function Editor() {
                                 className="px-2 py-1 border rounded disabled:opacity-50 w-max"
                                 disabled={generatingAny}
                                 onClick={async () => {
-                                  const ok = await ensurePaid("generate");
+                                  const ok = await ensurePaid();
                                   if (!ok) return;
                                   const promptText = (
                                     nodePrompts[child.id] ?? ""
@@ -2069,11 +2148,14 @@ export default function Editor() {
                                       "Return only the new text, no commentary.",
                                       `Current text: "${(child as TextChild).text || ""}"`,
                                     ].join("\n");
-                                    const out =
-                                      await generateTextContent(textPrompt);
+                                    const out = (await aiGenerateText({
+                                      prompt: textPrompt,
+                                    })) as any;
                                     if (!isPageOpCurrent(currentPageId!, op))
                                       return;
-                                    const label = cleanSingleLineLabel(out);
+                                    const label = cleanSingleLineLabel(
+                                      String(out?.text || ""),
+                                    );
                                     setPagePatch(currentPageId!, {
                                       children: (
                                         currentPage?.children || []
@@ -2083,6 +2165,18 @@ export default function Editor() {
                                           : c,
                                       ),
                                     });
+                                    // Persist text to Convex when signed in
+                                    if (
+                                      isSignedIn &&
+                                      !isLocalNodeId(child.id)
+                                    ) {
+                                      try {
+                                        await updateTextNodeMutation({
+                                          nodeId: child.id,
+                                          content: label,
+                                        });
+                                      } catch {}
+                                    }
                                     writeUI(() =>
                                       setPagePatch(currentPageId!, {
                                         generating: false,
@@ -2189,7 +2283,7 @@ export default function Editor() {
                               <button
                                 className="px-2 py-1 border rounded text-xs"
                                 onClick={async () => {
-                                  const ok = await ensurePaid("generate");
+                                  const ok = await ensurePaid();
                                   if (!ok) return;
                                   try {
                                     setPagePatch(currentPageId!, {
@@ -2201,22 +2295,13 @@ export default function Editor() {
                                       nodePrompts[child.id] ?? "",
                                       "image",
                                     );
-                                    const ic = child as ImageChild;
-                                    let url: string;
-                                    if (ic.src) {
-                                      const b64 = await blobUrlToPngBase64(
-                                        ic.src,
-                                      );
-                                      url = await transformImageWithPrompt(
-                                        b64,
-                                        instruction,
-                                      );
-                                    } else {
-                                      url =
-                                        await generateColoringBookImage(
-                                          instruction,
-                                        );
-                                    }
+                                    if (!projectId)
+                                      throw new Error("No projectId");
+                                    const out = await aiGenerateImage({
+                                      projectId,
+                                      prompt: instruction,
+                                    });
+                                    const url = out?.url as string;
                                     // Fit generated image to this node's rectangle (trim borders, preserve aspect)
                                     const fitted = await fitImageToRect(
                                       url,
@@ -2231,6 +2316,9 @@ export default function Editor() {
                                             ...(c as ImageChild),
                                             src: fitted,
                                             placeholder: false,
+                                            fileId:
+                                              (out?.fileId as any) ??
+                                              (c as any).fileId,
                                           }
                                         : c,
                                     );
@@ -2239,6 +2327,17 @@ export default function Editor() {
                                       generating: false,
                                       status: "",
                                     });
+                                    // persist fileId on node
+                                    const fid = out?.fileId as any;
+                                    if (
+                                      isSignedIn &&
+                                      fid &&
+                                      !isLocalNodeId(child.id)
+                                    )
+                                      void updateImageNodeMutation({
+                                        nodeId: child.id,
+                                        fileId: fid,
+                                      });
                                   } catch (err) {
                                     setPagePatch(currentPageId!, {
                                       generating: false,
@@ -2384,67 +2483,7 @@ export default function Editor() {
           </div>
         </div>
       )}
-      {showSettings && (
-        <div
-          role="dialog"
-          aria-modal
-          className="fixed inset-0 bg-black/40 grid place-items-center"
-        >
-          <div className="bg-white text-black rounded-md shadow-lg p-4 w-[420px] max-w-[90vw]">
-            <h2 className="font-semibold mb-3">Gemini API Key</h2>
-            <p className="text-sm text-slate-600 mb-2">
-              Stored in localStorage (use at your own risk).
-            </p>
-            <input
-              id="apikey"
-              className="border rounded px-2 py-1 w-full mb-2"
-              placeholder="GEMINI_API_KEY"
-              defaultValue={
-                typeof window !== "undefined"
-                  ? localStorage.getItem("CHECKFU_GEMINI_API_KEY") || ""
-                  : ""
-              }
-            />
-            <div className="flex justify-end gap-2">
-              <button
-                className="px-2 py-1 border rounded"
-                onClick={() => {
-                  localStorage.removeItem("CHECKFU_GEMINI_API_KEY");
-                  setShowSettings(false);
-                  window.dispatchEvent(
-                    new StorageEvent("storage", {
-                      key: "CHECKFU_GEMINI_API_KEY",
-                    }),
-                  );
-                }}
-              >
-                Clear
-              </button>
-              <button
-                className="px-2 py-1 border rounded"
-                onClick={() => {
-                  const el = document.getElementById(
-                    "apikey",
-                  ) as HTMLInputElement | null;
-                  if (el)
-                    localStorage.setItem(
-                      "CHECKFU_GEMINI_API_KEY",
-                      el.value || "",
-                    );
-                  setShowSettings(false);
-                  window.dispatchEvent(
-                    new StorageEvent("storage", {
-                      key: "CHECKFU_GEMINI_API_KEY",
-                    }),
-                  );
-                }}
-              >
-                Save
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* Settings modal removed */}
     </div>
   );
 }

@@ -74,3 +74,11 @@ export const getProjectFull = query({
     return { project, pages, edges, nodesByPage };
   },
 });
+
+export const getProjectById = query({
+  args: { projectId: v.id("projects") },
+  handler: async (ctx, { projectId }) => {
+    const project = await ctx.db.get(projectId);
+    return project;
+  },
+});
