@@ -77,6 +77,7 @@ import {
   fitImageToRect,
   thresholdToDataUrl,
 } from "@/lib/image/bitmap";
+import { childrenEqual } from "@/lib/fabric/translators";
 import { flattenPageToPng, addPageToJsPdf } from "@/lib/pdf";
 import {
   computeSystemPrompt,
@@ -316,25 +317,30 @@ export default function Editor() {
   const isLocalNodeId = (id: string) =>
     id.startsWith("t_") || id.startsWith("img") || id.startsWith("imgph");
   // Fetch full project once we have an id
-  const projectFull = useQuery(
-    apiAny.projects?.getProjectFull ?? apiAny.explore?.getProjectFull,
+  // Live project graph and nodes
+  const projectGraph = useQuery(
+    apiAny.projects?.getProjectGraph,
+    projectId ? { projectId } : "skip",
+  ) as any;
+  const projectNodes = useQuery(
+    apiAny.nodes?.getByProject,
     projectId ? { projectId } : "skip",
   ) as any;
 
-  // Collect fileIds in this project to fetch display URLs (once)
+  // Collect fileIds in this project to fetch display URLs (live)
   const projectFileIds = useMemo(() => {
-    if (!projectFull) return [] as string[];
+    if (!projectGraph || !projectNodes) return [] as string[];
     const set = new Set<string>();
-    for (const p of projectFull.pages || []) {
+    for (const p of projectGraph.pages || []) {
       if (p.renderFileId) set.add(p.renderFileId as string);
-      const nodes: any[] = projectFull.nodesByPage?.[p._id] || [];
+      const nodes: any[] = projectNodes.nodesByPage?.[p._id] || [];
       for (const n of nodes)
         if (n.kind === "image" && n.fileId) set.add(n.fileId as string);
     }
     return Array.from(set);
-  }, [projectFull]);
+  }, [projectGraph, projectNodes]);
   const fileUrls = useQuery(
-    apiAny.files?.getFileUrls ?? apiAny.explore?.getFileUrls,
+    apiAny.files?.getFileUrls,
     projectFileIds.length ? { fileIds: projectFileIds } : "skip",
   ) as any;
 
@@ -352,41 +358,51 @@ export default function Editor() {
     })();
   }, [isSignedIn, projectId, getOrCreateMyProject]);
 
-  // Hydrate store from server the first time
-  const hydratedRef = useRef(false);
+  // Live sync — pages + edges
   useEffect(() => {
-    if (!projectFull || hydratedRef.current) return;
-    const f = projectFull as {
-      project: any;
-      pages: any[];
-      edges: any[];
-      nodesByPage: Record<string, any[]>;
-    } | null;
-    if (!f) return;
-    // Simple hydration: add pages and children into store
-    const posPatch: Record<string, { x: number; y: number }> = {};
-    for (const p of f.pages) {
-      const pageIdStr = p._id as string;
-      const pageTitle = p.title as string;
-      const pageOrientation = (p.orientation as any) || "portrait";
-      (actions as any).addEmptyPage?.({
-        id: pageIdStr,
-        title: pageTitle,
-        orientation: pageOrientation,
-        imageUrl:
-          (p.renderFileId &&
-            (fileUrls as any)?.urls?.[p.renderFileId as string]) ||
-          undefined,
-      });
-      // Capture persisted graph position
-      if (typeof p.x === "number" && typeof p.y === "number") {
-        posPatch[pageIdStr] = { x: Math.round(p.x), y: Math.round(p.y) };
+    const g = projectGraph as { pages: any[]; edges: any[] } | null;
+    if (!g) return;
+    const pos: Record<string, { x: number; y: number }> = {};
+    const existing = useEditorStore.getState().pages;
+    for (const p of g.pages) {
+      const id = String(p._id);
+      if (!existing[id]) {
+        (actions as any).addEmptyPage?.({
+          id,
+          title: p.title,
+          orientation: (p.orientation as any) || "portrait",
+          imageUrl:
+            (p.renderFileId &&
+              (fileUrls as any)?.urls?.[p.renderFileId as string]) ||
+            undefined,
+        });
+      } else {
+        (actions as any).patchPage?.(id, {
+          title: p.title,
+          orientation: (p.orientation as any) || existing[id].orientation,
+        });
       }
-      const nodes = (f.nodesByPage[pageIdStr] || []) as any[];
-      const children = nodes.map((n) => {
+      if (typeof p.x === "number" && typeof p.y === "number")
+        pos[id] = { x: Math.round(p.x), y: Math.round(p.y) };
+    }
+    if (Object.keys(pos).length) (actions as any).setNodePositions?.(pos);
+    const edgeList = (g.edges || []).map((e: any) => ({
+      id: String(e._id),
+      source: String(e.srcPageId),
+      target: String(e.dstPageId),
+    }));
+    if ((actions as any).setEdges) (actions as any).setEdges(edgeList);
+  }, [projectGraph, fileUrls, actions]);
+
+  // Live sync — nodes by page
+  useEffect(() => {
+    const np = projectNodes as { nodesByPage: Record<string, any[]> } | null;
+    if (!np) return;
+    for (const [pid, nodes] of Object.entries(np.nodesByPage || {})) {
+      const children = (nodes as any[]).map((n) => {
         if (n.kind === "text") {
           return {
-            id: n._id as string,
+            id: String(n._id),
             type: "text",
             x: n.x,
             y: n.y,
@@ -403,43 +419,33 @@ export default function Editor() {
             italic: !!n.style?.italic,
             align: (n.style?.align as any) || "left",
           } as TextChild;
-        } else {
-          const fid = (n as any).fileId as string | undefined;
-          const url = fid ? fileUrls?.urls?.[fid] : undefined;
-          return {
-            id: n._id as string,
-            type: "image",
-            x: n.x,
-            y: n.y,
-            width: n.width,
-            height: n.height,
-            angle: n.rotation || 0,
-            visible: true,
-            locked: false,
-            z: n.z || 0,
-            src: url,
-            placeholder: !url,
-            fileId: fid,
-            crop: null,
-          } as ImageChild;
         }
+        const fid = (n as any).fileId as string | undefined;
+        const url = fid ? (fileUrls as any)?.urls?.[fid] : undefined;
+        return {
+          id: String(n._id),
+          type: "image",
+          x: n.x,
+          y: n.y,
+          width: n.width,
+          height: n.height,
+          angle: n.rotation || 0,
+          visible: true,
+          locked: false,
+          z: n.z || 0,
+          src: url,
+          placeholder: !url,
+          fileId: fid,
+          crop: null,
+        } as ImageChild;
       });
-      (actions as any).replaceChildren?.(pageIdStr, children);
+      const current = useEditorStore.getState().pages[pid]?.children || [];
+      if (!childrenEqual(children as any, current as any))
+        (actions as any).replaceChildren?.(pid, children);
     }
-    if (Object.keys(posPatch).length) {
-      (actions as any).setNodePositions?.(posPatch);
-    }
-    // Load edges (use a dedicated setter so ids match DB ids)
-    const edgeList = (f.edges || []).map((e: any) => ({
-      id: e._id as string,
-      source: e.srcPageId as string,
-      target: e.dstPageId as string,
-    }));
-    if ((actions as any).setEdges) (actions as any).setEdges(edgeList);
-    hydratedRef.current = true;
-  }, [projectFull, fileUrls, actions]);
+  }, [projectNodes, fileUrls, actions]);
 
-  // When file URLs arrive after initial hydration, patch image children that
+  // When file URLs arrive after live graph sync, patch image children that
   // have a fileId but are still placeholders (or missing src) with the URL.
   useEffect(() => {
     const map = (fileUrls as any)?.urls as Record<string, string> | undefined;
@@ -450,7 +456,7 @@ export default function Editor() {
       const page = state.pages[pid];
       if (!page) return;
       // Patch page background if render file URL is available and src missing
-      const pageFull = (projectFull as any)?.pages?.find(
+      const pageFull = (projectGraph as any)?.pages?.find(
         (pp: any) => String(pp._id) === pid,
       );
       const pageRenderId = pageFull?.renderFileId as string | undefined;
@@ -481,7 +487,7 @@ export default function Editor() {
       });
       if (changed) (actions as any).replaceChildren?.(pid, next);
     });
-  }, [fileUrls, actions, projectFull]);
+  }, [fileUrls, actions, projectGraph]);
 
   // Debounced server updates for node changes
   const nodeUpdateTimersRef = useRef<Record<string, number>>({});

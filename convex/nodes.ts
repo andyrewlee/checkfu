@@ -1,5 +1,6 @@
 import { v } from "convex/values";
 import { mutation } from "./_generated/server";
+import { query } from "./_generated/server";
 
 export const addTextNode = mutation({
   args: {
@@ -139,5 +140,24 @@ export const deleteNode = mutation({
     if (!n) return false;
     await ctx.db.delete(nodeId);
     return true;
+  },
+});
+
+export const getByProject = query({
+  args: { projectId: v.id("projects") },
+  handler: async (ctx, { projectId }) => {
+    const pages = await ctx.db
+      .query("pages")
+      .withIndex("by_project", (q) => q.eq("projectId", projectId))
+      .collect();
+    const nodesByPage: Record<string, any[]> = {};
+    for (const p of pages) {
+      const nodes = await ctx.db
+        .query("nodes")
+        .withIndex("by_page", (q) => q.eq("pageId", p._id))
+        .collect();
+      nodesByPage[p._id] = nodes;
+    }
+    return { nodesByPage } as const;
   },
 });

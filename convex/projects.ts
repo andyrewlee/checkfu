@@ -75,6 +75,21 @@ export const getProjectFull = query({
   },
 });
 
+export const getProjectGraph = query({
+  args: { projectId: v.id("projects") },
+  handler: async (ctx, { projectId }) => {
+    const pages = await ctx.db
+      .query("pages")
+      .withIndex("by_project", (q) => q.eq("projectId", projectId))
+      .collect();
+    const edges = await ctx.db
+      .query("pageEdges")
+      .withIndex("by_project", (q) => q.eq("projectId", projectId))
+      .collect();
+    return { pages, edges } as const;
+  },
+});
+
 export const getProjectById = query({
   args: { projectId: v.id("projects") },
   handler: async (ctx, { projectId }) => {
